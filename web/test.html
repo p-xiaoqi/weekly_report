@@ -768,6 +768,7 @@
         }
 
         // ---------- 获取我的群聊 ----------
+        let myChats = [];
         async function loadMyChats() {
             if (!requireLogin()) return;
             const box = document.getElementById('chat-list');
@@ -780,35 +781,77 @@
                     addLog('获取群聊失败: ' + (data.error || ''), 'error');
                     return;
                 }
-                const chats = data.data || [];
-                if (chats.length === 0) {
+                myChats = data.data || [];
+                if (myChats.length === 0) {
                     box.innerHTML = '<span style="color:#888">没有找到群聊（机器人/你需要先加入群，并确认应用已开通 im:chat 权限）</span>';
                     return;
                 }
-                let html = '<div style="font-size:12px;color:#666;margin-bottom:6px;">点击复制 chat_id；多群通知把多个 id 用英文逗号拼到 REMINDER_CHAT_ID</div>';
+                let html = '<div style="font-size:12px;color:#666;margin-bottom:6px;">勾选要通知的群（可多选），点下方按钮发送测试，结果会逐群显示成功/失败</div>';
                 html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
-                html += '<tr style="background:#f5f5f5;"><th style="text-align:left;padding:4px 6px;">群名称</th><th style="text-align:left;padding:4px 6px;">chat_id</th><th></th></tr>';
-                chats.forEach(ch => {
-                    const cid = escapeHtml(ch.chat_id);
+                html += '<tr style="background:#f5f5f5;"><th style="width:32px;padding:4px 6px;"><input type="checkbox" id="chat-all" onclick="toggleAllChats(this)"></th><th style="text-align:left;padding:4px 6px;">群名称</th><th style="text-align:left;padding:4px 6px;">chat_id</th><th style="width:64px;padding:4px 6px;">结果</th></tr>';
+                myChats.forEach((ch, i) => {
                     html += '<tr style="border-top:1px solid #eee;">'
+                        + '<td style="padding:4px 6px;text-align:center;"><input type="checkbox" class="chat-ck" value="' + escapeHtml(ch.chat_id) + '"></td>'
                         + '<td style="padding:4px 6px;">' + escapeHtml(ch.name || '(未命名)') + '</td>'
-                        + '<td style="padding:4px 6px;font-family:monospace;">' + cid + '</td>'
-                        + '<td style="padding:4px 6px;"><button class="btn" style="padding:2px 8px;font-size:12px;" onclick="copyText(\'' + cid + '\')">复制</button></td>'
+                        + '<td style="padding:4px 6px;font-family:monospace;font-size:12px;">' + escapeHtml(ch.chat_id) + '</td>'
+                        + '<td id="chat-res-' + i + '" style="padding:4px 6px;text-align:center;color:#888;">-</td>'
                         + '</tr>';
                 });
                 html += '</table>';
+                html += '<div style="margin-top:8px;"><button class="btn btn-warning" onclick="sendTestToSelected()">📨 发送测试到选中群</button></div>';
                 box.innerHTML = html;
-                addLog('💬 获取到 ' + chats.length + ' 个群聊', 'success');
+                addLog('💬 获取到 ' + myChats.length + ' 个群聊', 'success');
             } catch (e) {
                 box.innerHTML = '<span style="color:#c0392b">' + escapeHtml(e.message) + '</span>';
                 addLog('获取群聊失败: ' + e.message, 'error');
             }
         }
 
-        function copyText(t) {
-            (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject())
-                .then(() => showToast('已复制: ' + t, 'success'))
-                .catch(() => showToast('复制失败，请手动选择：' + t, 'warn'));
+        function toggleAllChats(master) {
+            document.querySelectorAll('.chat-ck').forEach(ck => { ck.checked = master.checked; });
+        }
+
+        async function sendTestToSelected() {
+            if (!requireLogin()) return;
+            const checked = Array.from(document.querySelectorAll('.chat-ck:checked')).map(ck => ck.value);
+            if (checked.length === 0) { showToast('请先勾选至少一个群', 'warn'); return; }
+            // 清空旧结果
+            myChats.forEach((ch, i) => {
+                const cell = document.getElementById('chat-res-' + i);
+                if (cell && checked.includes(ch.chat_id)) { cell.textContent = '…'; cell.style.color = '#888'; }
+            });
+            try {
+                const res = await fetch('/api/v1/admin/remind', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_ids: checked })
+                });
+                const data = await res.json();
+                if (data.code !== 0) {
+                    showToast(data.error || '发送失败', 'error');
+                    addLog('发送失败: ' + (data.error || ''), 'error');
+                    return;
+                }
+                const results = data.data || [];
+                const idxOf = {};
+                myChats.forEach((ch, i) => { idxOf[ch.chat_id] = i; });
+                results.forEach(r => {
+                    const i = idxOf[r.target];
+                    const cell = (i != null) ? document.getElementById('chat-res-' + i) : null;
+                    const name = (i != null && myChats[i]) ? (myChats[i].name || r.target) : r.target;
+                    if (cell) {
+                        cell.textContent = r.success ? '✅成功' : '❌失败';
+                        cell.style.color = r.success ? '#27ae60' : '#c0392b';
+                        if (!r.success && r.error) cell.title = r.error;
+                    }
+                    addLog((r.success ? '✅ ' : '❌ ') + name + (r.success ? ' 通知成功' : ' 通知失败: ' + (r.error || '')), r.success ? 'success' : 'error');
+                });
+                showToast(data.message || '发送完成', results.every(r => r.success) ? 'success' : 'warn');
+            } catch (e) {
+                showToast('发送失败: ' + e.message, 'error');
+                addLog('发送失败: ' + e.message, 'error');
+            }
         }
 
         // ---------- 数据源 ----------

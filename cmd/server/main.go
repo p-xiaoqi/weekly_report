@@ -1537,10 +1537,40 @@ func testRemindHandler(c *gin.Context) {
 		response.Fail(c, http.StatusInternalServerError, response.CodeRemindFailed, "提醒服务未初始化")
 		return
 	}
-	// 应用身份模式下默认私信当前登录管理员本人，无需 webhook / open_id 配置。
-	toOpenID, _ := c.Cookie("user_id")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	// 可选请求体：勾选要发送的群 chat_ids。提供时按群逐个发送并返回每个群的结果。
+	var body struct {
+		ChatIDs []string `json:"chat_ids"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
+	if len(body.ChatIDs) > 0 {
+		results, err := reminderSvc.SendToChats(ctx, body.ChatIDs, "")
+		if err != nil {
+			response.Fail(c, http.StatusInternalServerError, response.CodeRemindFailed, err.Error())
+			return
+		}
+		ok, fail := 0, 0
+		for _, r := range results {
+			if r.Success {
+				ok++
+			} else {
+				fail++
+			}
+		}
+		c.JSON(200, gin.H{
+			"code":    0,
+			"message": fmt.Sprintf("发送完成：成功 %d，失败 %d", ok, fail),
+			"data":    results,
+		})
+		return
+	}
+
+	// 未勾选群时：应用身份模式下私信当前登录管理员本人，否则回退 webhook。
+	toOpenID, _ := c.Cookie("user_id")
 	if err := reminderSvc.SendTest(ctx, toOpenID, cfg.Reminder.BotWebhook, cfg.Reminder.BotSecret, ""); err != nil {
 		response.Fail(c, http.StatusInternalServerError, response.CodeRemindFailed, err.Error())
 		return

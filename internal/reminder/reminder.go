@@ -234,6 +234,36 @@ func (r *ReminderService) SendTest(ctx context.Context, toOpenID, webhook, secre
 	return r.SendTestMessage(webhook, secret, content)
 }
 
+// SendResult 单个通知目标的发送结果。
+type SendResult struct {
+	Target  string `json:"target"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// SendToChats 用应用身份(App ID/Secret)向指定群逐个发送消息，返回每个群的成功/失败结果。
+func (r *ReminderService) SendToChats(ctx context.Context, chatIDs []string, content string) ([]SendResult, error) {
+	if r.appSender == nil {
+		return nil, fmt.Errorf("未启用应用身份发送（请配置 FEISHU_APP_ID / FEISHU_APP_SECRET）")
+	}
+	if len(chatIDs) == 0 {
+		return nil, fmt.Errorf("未选择任何群")
+	}
+	if content == "" {
+		content = "🧪 这是周报系统的测试消息"
+	}
+	results := make([]SendResult, 0, len(chatIDs))
+	for _, cid := range chatIDs {
+		res := SendResult{Target: cid, Success: true}
+		if err := r.appSender.SendMessage(ctx, "chat_id", cid, content); err != nil {
+			res.Success = false
+			res.Error = err.Error()
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
 // genSign 按飞书自定义机器人“加签”算法生成 timestamp 与 sign。
 // 算法：stringToSign = "{timestamp}\n{secret}"，对其做 HMAC-SHA256（key=stringToSign，消息体为空），再 base64。
 func genSign(secret string, ts int64) string {
