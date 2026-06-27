@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>周报系统测试</title>
+    <style>
+        :root { --primary: #409eff; --primary-dark: #66b1ff; --success: #67c23a; --warning: #e6a23c; --danger: #f56c6c; --text: #303133; --text-secondary: #606266; --border: #dcdfe6; --bg: #f5f7fa; --card: #ffffff; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+        .header { background: linear-gradient(135deg, #409eff 0%, #66b1ff 100%); color: white; padding: 24px 0; text-align: center; box-shadow: 0 2px 12px rgba(64,158,255,0.3); }
+        .header h1 { font-size: 28px; font-weight: 500; margin-bottom: 6px; }
+        .header p { font-size: 14px; opacity: 0.9; }
+        .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+        .card { background: var(--card); border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); padding: 24px; margin-bottom: 20px; }
+        .card-title { font-size: 18px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .form-group { margin-bottom: 16px; }
+        label { display: block; font-size: 14px; color: var(--text-secondary); margin-bottom: 6px; font-weight: 500; }
+        input[type="text"], input[type="date"], select, textarea { width: 100%; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; transition: border-color .2s; background: #fff; }
+        input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(64,158,255,0.1); }
+        .btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all .2s; font-weight: 500; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-dark); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(64,158,255,0.3); }
+        .btn-primary:disabled { opacity: .6; cursor: not-allowed; transform: none; box-shadow: none; }
+        .btn-success { background: var(--success); color: white; }
+        .btn-success:hover { background: #85ce61; }
+        .btn-warning { background: var(--warning); color: white; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-secondary { background: #f0f2f5; color: var(--text); border: 1px solid var(--border); }
+        .btn-secondary:hover { background: #e4e7ed; }
+        .btn-group { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+        .status { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; padding: 6px 12px; border-radius: 20px; background: #f0f2f5; }
+        .status.ok { background: #f0f9eb; color: var(--success); }
+        .status.error { background: #fef0f0; color: var(--danger); }
+        .status.warn { background: #fdf6ec; color: var(--warning); }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .status.ok .status-dot { background: var(--success); }
+        .status.error .status-dot { background: var(--danger); }
+        .status.warn .status-dot { background: var(--warning); }
+        .log-area { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 16px; font-family: 'Menlo', 'Monaco', monospace; font-size: 13px; max-height: 300px; overflow-y: auto; margin-top: 16px; }
+        .log-line { padding: 2px 0; border-bottom: 1px solid #333; }
+        .log-time { color: #858585; margin-right: 8px; }
+        .log-info { color: #4fc1ff; }
+        .log-success { color: #67c23a; }
+        .log-error { color: #f56c6c; }
+        .log-warn { color: #e6a23c; }
+        .toast { position: fixed; top: 24px; right: 24px; padding: 14px 24px; border-radius: 8px; color: white; font-size: 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); transform: translateX(400px); transition: transform .3s ease; z-index: 9999; }
+        .toast.show { transform: translateX(0); }
+        .toast.info { background: var(--primary); }
+        .toast.success { background: var(--success); }
+        .toast.error { background: var(--danger); }
+        .toast.warn { background: var(--warning); }
+        .section { margin-bottom: 20px; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } .btn-group { flex-direction: column; } }
+        .datasource-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: #fff; }
+        .datasource-item:hover { border-color: var(--primary); }
+        .loading { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; background: #f0f2f5; color: var(--text-secondary); margin-right: 6px; }
+        .tag.primary { background: #ecf5ff; color: var(--primary); }
+        .tag.success { background: #f0f9eb; color: var(--success); }
+        .tag.warn { background: #fdf6ec; color: var(--warning); }
+        .hidden { display: none !important; }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .modal { background: white; border-radius: 12px; padding: 24px; width: 90%; max-width: 500px; max-height: 80vh; overflow-y: auto; }
+        .modal-header { font-size: 18px; font-weight: 600; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+        .modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-secondary); }
+        .modal-close:hover { color: var(--danger); }
+        .empty-state { text-align: center; padding: 40px; color: var(--text-secondary); }
+        .empty-state-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+        .report-preview { background: #f8f9fa; border: 1px solid var(--border); border-radius: 8px; padding: 16px; font-size: 14px; white-space: pre-wrap; line-height: 1.8; min-height: 200px; }
+        .tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--border); margin-bottom: 16px; }
+        .tab { padding: 10px 16px; border: none; background: none; cursor: pointer; font-size: 14px; color: var(--text-secondary); border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 周报系统测试</h1>
+        <p>SQLite 模式 | 支持多数据源采集与模板导出</p>
+    </div>
+
+    <div class="container">
+        <!-- 状态卡片 -->
+        <div class="card">
+            <div class="card-title">🔐 登录状态</div>
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <span id="auth-status" class="status error"><span class="status-dot"></span>未登录</span>
+                <span id="user-info" style="font-size:14px;color:var(--text-secondary);"></span>
+                <button id="btn-auth-logout" class="btn btn-primary" onclick="doAuth()">🔐 飞书授权</button>
+            </div>
+            <div id="auth-hint" style="margin-top:10px;font-size:13px;color:var(--text-secondary);">点击上方按钮跳转飞书扫码授权。授权成功后即可生成周报。</div>
+        </div>
+
+        <!-- 周报生成 -->
+        <div class="card">
+            <div class="card-title">📝 周报生成</div>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>周一开始日期</label>
+                    <input type="date" id="week-start" />
+                </div>
+                <div class="form-group">
+                    <label>数据源</label>
+                    <select id="data-sources" multiple size="3" style="height:auto;">
+                        <option value="lark" selected>🔵 飞书任务</option>
+                        <option value="github">🐙 GitHub</option>
+                        <option value="gitlab">🦊 GitLab</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>模板</label>
+                <select id="template-select">
+                    <option value="">默认模板</option>
+                </select>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-success" id="btn-collect" onclick="doCollect()">
+                    <span id="collect-spinner"></span> 🚀 生成周报
+                </button>
+                <button class="btn btn-secondary" onclick="loadReports()">📚 历史周报</button>
+            </div>
+
+            <div id="result-area" class="hidden" style="margin-top:20px;">
+                <div class="tabs">
+                    <button class="tab active" onclick="switchTab('preview')">预览</button>
+                    <button class="tab" onclick="switchTab('raw')">原始数据</button>
+                </div>
+                <div id="tab-preview">
+                    <div id="report-preview" class="report-preview"></div>
+                    <div class="btn-group" style="margin-top:12px;">
+                        <button class="btn btn-secondary" onclick="exportReport('markdown')">📝 导出 Markdown</button>
+                        <button class="btn btn-secondary" onclick="exportReport('word')">📄 导出 Word</button>
+                        <button class="btn btn-secondary" onclick="exportReport('pdf')">📕 导出 PDF</button>
+                        <button class="btn btn-success" onclick="submitReport()">✅ 提交周报</button>
+                    </div>
+                </div>
+                <div id="tab-raw" class="hidden">
+                    <pre id="raw-data" style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow:auto;max-height:400px;font-size:12px;"></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- 数据源管理 -->
+        <div class="card">
+            <div class="card-title">🔗 数据源配置</div>
+            <div id="datasource-list"></div>
+            <div class="btn-group" style="margin-top:12px;">
+                <button class="btn btn-primary" onclick="showDataSourceModal()">➕ 添加数据源</button>
+                <button class="btn btn-secondary" onclick="refreshDataSources()">🔄 刷新</button>
+            </div>
+        </div>
+
+        <!-- 模板管理 -->
+        <div class="card">
+            <div class="card-title">📋 模板管理</div>
+            <div id="template-list"></div>
+            <div class="btn-group" style="margin-top:12px;">
+                <button class="btn btn-primary" onclick="showTemplateModal()">➕ 创建模板</button>
+                <button class="btn btn-secondary" onclick="refreshTemplates()">🔄 刷新</button>
+            </div>
+        </div>
+
+        <!-- 日志 -->
+        <div class="card">
+            <div class="card-title">📜 操作日志</div>
+            <div class="log-area" id="log-area">
+                <div class="log-line"><span class="log-time">[系统]</span><span class="log-info">页面加载完成，等待授权...</span></div>
+            </div>
+            <button class="btn btn-secondary" style="margin-top:10px;" onclick="clearLog()">🗑️ 清空日志</button>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast"></div>
+
+    <!-- 数据源模态框 -->
+    <div id="ds-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeDataSourceModal()">
+        <div class="modal">
+            <div class="modal-header">数据源配置<button class="modal-close" onclick="closeDataSourceModal()">&times;</button></div>
+            <input type="hidden" id="ds-id" />
+            <div class="form-group">
+                <label>类型</label>
+                <select id="ds-type">
+                    <option value="lark">🔵 飞书</option>
+                    <option value="github">🐙 GitHub</option>
+                    <option value="gitlab">🦊 GitLab</option>
+                    <option value="manual">📝 手动</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>名称</label>
+                <input type="text" id="ds-name" placeholder="例如：公司飞书" />
+            </div>
+            <div class="form-group">
+                <label>配置（JSON）</label>
+                <textarea id="ds-config" rows="4" placeholder='{"url":"https://example.com","token":"xxx"}'></textarea>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" onclick="saveDataSource()">💾 保存</button>
+                <button class="btn btn-secondary" onclick="closeDataSourceModal()">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 模板模态框 -->
+    <div id="tmpl-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeTemplateModal()">
+        <div class="modal">
+            <div class="modal-header">模板编辑<button class="modal-close" onclick="closeTemplateModal()">&times;</button></div>
+            <input type="hidden" id="tmpl-id" />
+            <div class="form-group">
+                <label>名称</label>
+                <input type="text" id="tmpl-name" placeholder="例如：开发周报模板" />
+            </div>
+            <div class="form-group">
+                <label>描述</label>
+                <input type="text" id="tmpl-desc" placeholder="模板用途说明" />
+            </div>
+            <div class="form-group">
+                <label>内容（Go Template）</label>
+                <textarea id="tmpl-content" rows="8" placeholder="## 周报 {{.WeekStart}}..."></textarea>
+            </div>
+            <div class="form-group">
+                <label>适用角色</label>
+                <select id="tmpl-role">
+                    <option value="developer">开发</option>
+                    <option value="tester">测试</option>
+                    <option value="product_manager">产品</option>
+                    <option value="designer">设计</option>
+                    <option value="leader">管理</option>
+                </select>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" onclick="saveTemplate()">💾 保存</button>
+                <button class="btn btn-secondary" onclick="closeTemplateModal()">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ---------- 工具函数 ----------
+        function addLog(msg, type = 'info') {
+            const logArea = document.getElementById('log-area');
+            const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            const classMap = { info: 'log-info', success: 'log-success', error: 'log-error', warn: 'log-warn' };
+            const line = document.createElement('div');
+            line.className = 'log-line';
+            line.innerHTML = `<span class="log-time">[${time}]</span><span class="${classMap[type] || 'log-info'}">${msg}</span>`;
+            logArea.appendChild(line);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+        function clearLog() { document.getElementById('log-area').innerHTML = ''; }
+        function showToast(msg, type = 'info') {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.className = `toast ${type} show`;
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+        function setLoading(btnId, loading) {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            if (loading) { btn.disabled = true; btn.dataset.originalText = btn.innerHTML; btn.innerHTML = '<span class="loading"></span> 处理中...'; }
+            else { btn.disabled = false; btn.innerHTML = btn.dataset.originalText || btn.innerHTML; }
+        }
+        function switchTab(name) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('tab-preview').classList.toggle('hidden', name !== 'preview');
+            document.getElementById('tab-raw').classList.toggle('hidden', name !== 'raw');
+        }
+
+        // ---------- 初始化 ----------
+        document.addEventListener('DOMContentLoaded', () => {
+            // 默认日期设为本周一
+            const d = new Date();
+            d.setDate(d.getDate() - d.getDay() + 1);
+            document.getElementById('week-start').value = d.toISOString().split('T')[0];
+            initAuth();
+            refreshTemplates();
+            refreshDataSources();
+        });
+
+        // ---------- 认证 ----------
+        async function initAuth() {
+            try {
+                const res = await fetch('/api/v1/auth/status', { credentials: 'include' });
+                const data = await res.json();
+                addLog(`授权状态: ${JSON.stringify(data)}`, 'info');
+                if (data.code === 0 && data.data && data.data.logged_in) {
+                    const sources = data.data.data_sources || [];
+                    const hasAny = sources.length > 0;
+                    const name = data.data.user_name || '未知用户';
+                    const status = document.getElementById('auth-status');
+                    status.className = hasAny ? 'status ok' : 'status warn';
+                    status.innerHTML = `<span class="status-dot"></span>${hasAny ? '已授权' : '已登录(未授权)'}`;
+                    document.getElementById('user-info').textContent = `${name} (${data.data.user_id})`;
+                    document.getElementById('auth-hint').textContent = hasAny ? '已绑定数据源，可生成周报' : '已登录，建议绑定数据源';
+                    const btn = document.getElementById('btn-auth-logout');
+                    btn.innerHTML = '<span>🔗</span> 退出登录';
+                    btn.onclick = doLogout;
+                    btn.classList.remove('btn-primary'); btn.classList.add('btn-danger');
+                    addLog(`✅ 登录用户: ${name}`, 'success');
+                } else {
+                    resetAuthUI();
+                }
+            } catch (e) {
+                addLog('获取授权状态失败: ' + e.message, 'error');
+                resetAuthUI();
+            }
+        }
+        function resetAuthUI() {
+            document.getElementById('auth-status').className = 'status error';
+            document.getElementById('auth-status').innerHTML = '<span class="status-dot"></span>未登录';
+            document.getElementById('user-info').textContent = '';
+            document.getElementById('auth-hint').textContent = '点击上方按钮跳转飞书扫码授权。授权成功后即可生成周报。';
+            const btn = document.getElementById('btn-auth-logout');
+            btn.innerHTML = '<span>🔐</span> 飞书授权';
+            btn.onclick = doAuth;
+            btn.classList.remove('btn-danger'); btn.classList.add('btn-primary');
+        }
+        async function doAuth() {
+            addLog('请求飞书授权链接...', 'info');
+            try {
+                const res = await fetch('/api/v1/auth/lark/login');
+                const data = await res.json();
+                addLog(`响应: ${JSON.stringify(data)}`, 'info');
+                if (data.code === 0 && data.data && data.data.auth_url) {
+                    showToast('正在跳转飞书授权...', 'info');
+                    window.location.href = data.data.auth_url;
+                } else {
+                    showToast(data.message || '获取授权链接失败', 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+                addLog('授权请求失败: ' + e.message, 'error');
+            }
+        }
+        async function doLogout() {
+            if (!confirm('确定要退出登录吗？')) return;
+            try {
+                const res = await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) {
+                    showToast('已退出登录', 'success');
+                    addLog('已退出登录', 'success');
+                    resetAuthUI();
+                } else {
+                    showToast(data.message || '退出失败', 'error');
+                }
+            } catch (e) {
+                showToast('退出失败: ' + e.message, 'error');
+            }
+        }
+
+        // ---------- 周报生成 ----------
+        async function doCollect() {
+            const weekStart = document.getElementById('week-start').value;
+            if (!weekStart) { showToast('请选择周一开始日期', 'warn'); return; }
+            const sources = Array.from(document.getElementById('data-sources').selectedOptions).map(o => o.value);
+            if (sources.length === 0) { showToast('请至少选择一个数据源', 'warn'); return; }
+            const templateId = document.getElementById('template-select').value;
+
+            setLoading('btn-collect', true);
+            try {
+                const res = await fetch('/api/v1/collect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ week_start: weekStart, data_sources: sources, template_id: templateId ? parseInt(templateId) : 0 })
+                });
+                const data = await res.json();
+                if (data.code === 0) {
+                    showToast('周报生成成功！', 'success');
+                    addLog(`✅ 生成成功，记录数: ${data.data.auto_stats.task_count}`, 'success');
+                    renderReport(data.data);
+                } else {
+                    showToast(data.error || '生成失败', 'error');
+                    addLog(`❌ 生成失败: ${data.error}`, 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+                addLog(`❌ 请求失败: ${e.message}`, 'error');
+            } finally {
+                setLoading('btn-collect', false);
+            }
+        }
+        function renderReport(data) {
+            const report = data.report;
+            const preview = document.getElementById('report-preview');
+            const raw = document.getElementById('raw-data');
+            preview.textContent = report.markdown;
+            raw.textContent = JSON.stringify(data, null, 2);
+            document.getElementById('result-area').classList.remove('hidden');
+        }
+        async function loadReports() {
+            try {
+                const res = await fetch('/api/v1/reports', { credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) {
+                    addLog(`📚 历史周报: ${data.data.length} 条`, 'info');
+                    if (data.data.length > 0) {
+                        const latest = data.data[0];
+                        showToast(`加载最近周报: ${latest.week_start}`, 'success');
+                        document.getElementById('week-start').value = latest.week_start;
+                        // 尝试加载详情
+                        const detail = await fetch(`/api/v1/reports/${latest.week_start}`, { credentials: 'include' });
+                        const detailData = await detail.json();
+                        if (detailData.code === 0) renderReport(detailData.data);
+                    }
+                }
+            } catch (e) { addLog('加载历史失败: ' + e.message, 'error'); }
+        }
+        async function submitReport() {
+            const weekStart = document.getElementById('week-start').value;
+            if (!weekStart) { showToast('请先选择日期', 'warn'); return; }
+            try {
+                const res = await fetch(`/api/v1/reports/${weekStart}/submit`, { method: 'POST', credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) { showToast('✅ 周报提交成功', 'success'); addLog('周报已提交', 'success'); }
+                else { showToast(data.error || '提交失败', 'error'); }
+            } catch (e) { showToast('提交失败: ' + e.message, 'error'); }
+        }
+        async function exportReport(format) {
+            const weekStart = document.getElementById('week-start').value;
+            if (!weekStart) { showToast('请先选择日期', 'warn'); return; }
+            showToast(`正在导出 ${format}...`, 'info');
+            window.open(`/api/v1/export/${weekStart}?format=${format}`, '_blank');
+        }
+
+        // ---------- 数据源 ----------
+        async function refreshDataSources() {
+            try {
+                const res = await fetch('/api/v1/datasources', { credentials: 'include' });
+                const data = await res.json();
+                const list = document.getElementById('datasource-list');
+                if (data.code === 0 && data.data.length > 0) {
+                    list.innerHTML = data.data.map(ds => `
+                        <div class="datasource-item">
+                            <div>
+                                <span class="tag primary">${ds.source}</span>
+                                <strong>${ds.name}</strong>
+                                <span class="tag ${ds.sync_status === 'success' ? 'success' : ds.sync_status === 'failed' ? 'error' : 'warn'}">${ds.sync_status || 'pending'}</span>
+                            </div>
+                            <div class="btn-group">
+                                <button class="btn btn-secondary" style="padding:4px 10px;font-size:12px;" onclick="editDataSource(${ds.id})">编辑</button>
+                                <button class="btn btn-danger" style="padding:4px 10px;font-size:12px;" onclick="deleteDataSource(${ds.id})">删除</button>
+                            </div>
+                        </div>
+                    `).join('');
+                    addLog(`数据源: ${data.data.length} 个`, 'info');
+                } else {
+                    list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div>暂无数据源</div>';
+                }
+            } catch (e) { addLog('刷新数据源失败: ' + e.message, 'error'); }
+        }
+        function showDataSourceModal() {
+            document.getElementById('ds-id').value = '';
+            document.getElementById('ds-type').value = 'lark';
+            document.getElementById('ds-name').value = '';
+            document.getElementById('ds-config').value = '';
+            document.getElementById('ds-modal').classList.remove('hidden');
+        }
+        function closeDataSourceModal() { document.getElementById('ds-modal').classList.add('hidden'); }
+        async function editDataSource(id) {
+            try {
+                const res = await fetch(`/api/v1/datasources/${id}`, { credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) {
+                    document.getElementById('ds-id').value = id;
+                    document.getElementById('ds-type').value = data.data.type;
+                    document.getElementById('ds-name').value = data.data.name;
+                    document.getElementById('ds-config').value = data.data.config;
+                    document.getElementById('ds-modal').classList.remove('hidden');
+                }
+            } catch (e) { showToast('加载失败: ' + e.message, 'error'); }
+        }
+        async function saveDataSource() {
+            const id = document.getElementById('ds-id').value;
+            const payload = {
+                type: document.getElementById('ds-type').value,
+                name: document.getElementById('ds-name').value,
+                config: JSON.parse(document.getElementById('ds-config').value || '{}')
+            };
+            try {
+                const url = id ? `/api/v1/datasources/${id}` : '/api/v1/datasources';
+                const method = id ? 'PUT' : 'POST';
+                const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(payload) });
+                const data = await res.json();
+                if (data.code === 0) { showToast('保存成功', 'success'); closeDataSourceModal(); refreshDataSources(); }
+                else { showToast(data.error || '保存失败', 'error'); }
+            } catch (e) { showToast('保存失败: ' + e.message, 'error'); }
+        }
+        async function deleteDataSource(id) {
+            if (!confirm('确定删除此数据源？')) return;
+            try {
+                const res = await fetch(`/api/v1/datasources/${id}`, { method: 'DELETE', credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) { showToast('删除成功', 'success'); refreshDataSources(); }
+                else { showToast(data.error || '删除失败', 'error'); }
+            } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+        }
+
+        // ---------- 模板 ----------
+        async function refreshTemplates() {
+            try {
+                const res = await fetch('/api/v1/templates', { credentials: 'include' });
+                const data = await res.json();
+                const select = document.getElementById('template-select');
+                const list = document.getElementById('template-list');
+                select.innerHTML = '<option value="">默认模板</option>';
+                if (data.code === 0 && data.data.length > 0) {
+                    data.data.forEach(t => {
+                        select.innerHTML += `<option value="${t.id}">${t.name}</option>`;
+                    });
+                    list.innerHTML = data.data.map(t => `
+                        <div class="datasource-item">
+                            <div>
+                                <span class="tag ${t.scope === 'global' ? 'success' : 'primary'}">${t.scope || 'personal'}</span>
+                                <strong>${t.name}</strong>
+                                <span class="tag">${t.role || '通用'}</span>
+                            </div>
+                            <div class="btn-group">
+                                <button class="btn btn-secondary" style="padding:4px 10px;font-size:12px;" onclick="editTemplate(${t.id})">编辑</button>
+                                <button class="btn btn-danger" style="padding:4px 10px;font-size:12px;" onclick="deleteTemplate(${t.id})">删除</button>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div>暂无模板</div>';
+                }
+            } catch (e) { addLog('刷新模板失败: ' + e.message, 'error'); }
+        }
+        function showTemplateModal() {
+            document.getElementById('tmpl-id').value = '';
+            document.getElementById('tmpl-name').value = '';
+            document.getElementById('tmpl-desc').value = '';
+            document.getElementById('tmpl-content').value = '';
+            document.getElementById('tmpl-role').value = 'developer';
+            document.getElementById('tmpl-modal').classList.remove('hidden');
+        }
+        function closeTemplateModal() { document.getElementById('tmpl-modal').classList.add('hidden'); }
+        async function editTemplate(id) {
+            try {
+                const res = await fetch(`/api/v1/templates/${id}`, { credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) {
+                    const t = data.data;
+                    document.getElementById('tmpl-id').value = id;
+                    document.getElementById('tmpl-name').value = t.name || '';
+                    document.getElementById('tmpl-desc').value = t.description || '';
+                    document.getElementById('tmpl-content').value = t.content || '';
+                    document.getElementById('tmpl-role').value = t.role || 'developer';
+                    document.getElementById('tmpl-modal').classList.remove('hidden');
+                }
+            } catch (e) { showToast('加载失败: ' + e.message, 'error'); }
+        }
+        async function saveTemplate() {
+            const id = document.getElementById('tmpl-id').value;
+            const payload = {
+                name: document.getElementById('tmpl-name').value,
+                description: document.getElementById('tmpl-desc').value,
+                content: document.getElementById('tmpl-content').value,
+                role: document.getElementById('tmpl-role').value
+            };
+            try {
+                const url = id ? `/api/v1/templates/${id}` : '/api/v1/templates';
+                const method = id ? 'PUT' : 'POST';
+                const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(payload) });
+                const data = await res.json();
+                if (data.code === 0) { showToast('保存成功', 'success'); closeTemplateModal(); refreshTemplates(); }
+                else { showToast(data.error || '保存失败', 'error'); }
+            } catch (e) { showToast('保存失败: ' + e.message, 'error'); }
+        }
+        async function deleteTemplate(id) {
+            if (!confirm('确定删除此模板？')) return;
+            try {
+                const res = await fetch(`/api/v1/templates/${id}`, { method: 'DELETE', credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) { showToast('删除成功', 'success'); refreshTemplates(); }
+                else { showToast(data.error || '删除失败', 'error'); }
+            } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+        }
+    </script>
+</body>
+</html>

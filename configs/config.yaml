@@ -1,0 +1,27 @@
+server:
+  port: "8080"
+  mode: debug
+
+feishu:
+  app_id: "${FEISHU_APP_ID}"
+  app_secret: "${FEISHU_APP_SECRET}"
+  redirect_uri: "${FEISHU_REDIRECT_URI}"
+
+database:
+  path: "weekly_report.db"
+  max_open_conns: 1
+  max_idle_conns: 1
+
+jwt:
+  secret: "${JWT_SECRET}"
+  expire_hours: 168
+
+log:
+  level: info
+  output: stdout
+
+reminder:
+  enabled: true
+  cron: "0 10 * * 5"
+  bot_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/e61c79e9-0f49-4948-a0bc-577ce7984f4e"
+  bot_secret: ""

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>周报采集助手</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="logo">📋</div>
+      <div class="title">周报采集助手</div>
+      <div class="subtitle">一键采集网页工作记录</div>
+    </div>
+
+    <div class="info-section">
+      <div class="info-row">
+        <span class="info-label">当前页面</span>
+        <span class="info-value" id="page-info">检测中...</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">检测到</span>
+        <span class="info-value" id="record-count">0 条记录</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-scan" class="btn btn-primary">
+        <span class="icon">🔍</span>
+        <span id="scan-text">扫描页面</span>
+      </button>
+      <button id="btn-send" class="btn btn-success" disabled>
+        <span class="icon">📤</span>
+        <span>生成周报</span>
+      </button>
+    </div>
+
+    <div class="result-section" id="result-section" style="display: none;">
+      <div class="result-header">
+        <span class="result-title">扫描结果</span>
+        <span class="result-count" id="result-count">0 条</span>
+      </div>
+      <div class="result-list" id="result-list">
+        <!-- 动态填充 -->
+      </div>
+    </div>
+
+    <div class="status-bar" id="status-bar">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">等待操作</span>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

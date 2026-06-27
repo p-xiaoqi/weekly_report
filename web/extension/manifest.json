@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "周报采集助手",
+  "version": "1.0.0",
+  "description": "从网页一键采集工作记录到周报系统",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:8080/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}
