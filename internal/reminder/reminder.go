@@ -2,10 +2,15 @@ package reminder
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -15,9 +20,10 @@ import (
 
 // ReminderService 定时提醒服务
 type ReminderService struct {
-	cron    *cron.Cron
-	store   *store.Store
-	enabled bool
+	cron      *cron.Cron
+	store     *store.Store
+	enabled   bool
+	botSecret string // 飞书自定义机器人“加签”密钥（可选）
 }
 
 // NewReminderService 创建提醒服务
@@ -28,10 +34,11 @@ func NewReminderService(s *store.Store) *ReminderService {
 }
 
 // Start 启动定时任务
-func (r *ReminderService) Start(spec string, botWebhook string) {
+func (r *ReminderService) Start(spec string, botWebhook string, botSecret string) {
 	if r.enabled {
 		return
 	}
+	r.botSecret = botSecret
 	r.cron = cron.New(cron.WithSeconds())
 
 	// 添加定时任务：每周五上午10点提醒
@@ -71,7 +78,7 @@ func (r *ReminderService) Start(spec string, botWebhook string) {
 		content := fmt.Sprintf("⏰ 周报提醒：%d 位成员尚未提交本周周报（%s），请及时提交！", len(unsubmittedUsers), mentionList)
 
 		if botWebhook != "" {
-			if err := r.sendBotMessage(botWebhook, content); err != nil {
+			if err := r.sendBotMessage(botWebhook, r.botSecret, content); err != nil {
 				log.Printf("[Reminder] 发送提醒失败: %v", err)
 			}
 		} else {
@@ -133,17 +140,37 @@ func (r *ReminderService) Stop() {
 // SendTestMessage 发送测试消息到飞书群机器人
 func (r *ReminderService) SendTestMessage(webhook, secret, content string) error {
 	if webhook == "" {
-		return fmt.Errorf("webhook URL 不能为空")
+		return fmt.Errorf("webhook URL 不能为空（请配置 FEISHU_BOT_WEBHOOK / REMINDER_BOT_WEBHOOK）")
 	}
 	if content == "" {
 		content = "🧪 这是周报系统的测试消息"
 	}
-	return r.sendBotMessage(webhook, content)
+	return r.sendBotMessage(webhook, secret, content)
 }
 
-// sendBotMessage 发送飞书群机器人消息
-func (r *ReminderService) sendBotMessage(webhook, content string) error {
-	payload := map[string]interface{}{"msg_type": "text", "content": map[string]string{"text": content}}
+// genSign 按飞书自定义机器人“加签”算法生成 timestamp 与 sign。
+// 算法：stringToSign = "{timestamp}\n{secret}"，对其做 HMAC-SHA256（key=stringToSign，消息体为空），再 base64。
+func genSign(secret string, ts int64) string {
+	stringToSign := strconv.FormatInt(ts, 10) + "\n" + secret
+	h := hmac.New(sha256.New, []byte(stringToSign))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+// sendBotMessage 发送飞书群机器人消息。
+// 关键：飞书 webhook 即使失败也返回 HTTP 200，错误体现在响应体的 code 字段，
+// 因此必须解析响应体并在 code != 0 时返回错误，否则会出现“显示成功但消息没到”的假象。
+func (r *ReminderService) sendBotMessage(webhook, secret, content string) error {
+	payload := map[string]interface{}{
+		"msg_type": "text",
+		"content":  map[string]string{"text": content},
+	}
+	// 若配置了加签密钥，则附带 timestamp + sign，否则飞书会以 19021 拒绝（但仍返回 HTTP 200）。
+	if secret != "" {
+		ts := time.Now().Unix()
+		payload["timestamp"] = strconv.FormatInt(ts, 10)
+		payload["sign"] = genSign(secret, ts)
+	}
+
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", webhook, bytes.NewReader(body))
 	if err != nil {
@@ -155,5 +182,29 @@ func (r *ReminderService) sendBotMessage(webhook, content string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("飞书机器人返回 HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// 解析飞书响应体：成功为 {"code":0,"msg":"success"}（旧格式 {"StatusCode":0,"StatusMessage":"success"}）。
+	var result struct {
+		Code          int    `json:"code"`
+		Msg           string `json:"msg"`
+		StatusCode    int    `json:"StatusCode"`
+		StatusMessage string `json:"StatusMessage"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		// 无法解析时保守处理：返回原始响应，便于排查
+		return fmt.Errorf("飞书机器人响应无法解析: %s", string(respBody))
+	}
+	if result.Code != 0 {
+		hint := ""
+		if result.Code == 19021 {
+			hint = "（该机器人开启了“加签”安全设置，请把密钥配置到 REMINDER_BOT_SECRET）"
+		}
+		return fmt.Errorf("飞书机器人发送失败 code=%d msg=%s%s", result.Code, result.Msg, hint)
+	}
 	return nil
 }

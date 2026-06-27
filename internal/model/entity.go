@@ -35,15 +35,18 @@ type ReportTemplateData struct {
 	WeekEnd        string
 	WeekRange      string
 	Tasks          []TemplateItem
+	Commits        []TemplateItem
 	Meetings       []TemplateItem
 	Docs           []TemplateItem
 	NextWeekEvents []TemplateItem
 	Problems       []string // 自动识别到的问题/阻塞项
 	TaskCount      int
+	CommitCount    int
 	MeetingCount   int
 	DocCount       int
 	NextWeekCount  int
 	HasTasks       bool
+	HasCommits     bool
 	HasMeetings    bool
 	HasDocs        bool
 	HasNextWeek    bool

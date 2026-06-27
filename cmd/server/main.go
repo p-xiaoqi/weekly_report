@@ -208,7 +208,7 @@ func main() {
 	// 提醒服务
 	reminderSvc = reminder.NewReminderService(storeDB)
 	if cfg.Reminder.Enabled {
-		reminderSvc.Start(cfg.Reminder.Cron, cfg.Reminder.BotWebhook)
+		reminderSvc.Start(cfg.Reminder.Cron, cfg.Reminder.BotWebhook, cfg.Reminder.BotSecret)
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -1212,6 +1212,69 @@ func persistSyncStatus(ds *model.DataSource, ok bool, errMsg string) {
 	}
 }
 
+// commitPreview 是测试连接时返回给前端展示的单条提交摘要。
+type commitPreview struct {
+	SHA     string `json:"sha"`
+	Message string `json:"message"`
+	Author  string `json:"author"`
+	Date    string `json:"date"`
+	Repo    string `json:"repo"`
+}
+
+// firstLine 截取多行提交信息的首行，避免破坏前端展示。
+func firstLine(s string) string {
+	if idx := strings.IndexAny(s, "\r\n"); idx >= 0 {
+		return s[:idx]
+	}
+	return s
+}
+
+// gitHubCommitsPreview 把拉取到的 GitHub 提交转成最多 20 条的预览列表，供测试连接展示。
+func gitHubCommitsPreview(commits []git.GitHubCommit, owner, repo string) []commitPreview {
+	const max = 20
+	out := make([]commitPreview, 0, len(commits))
+	for i, cm := range commits {
+		if i >= max {
+			break
+		}
+		sha := cm.SHA
+		if len(sha) > 7 {
+			sha = sha[:7]
+		}
+		out = append(out, commitPreview{
+			SHA:     sha,
+			Message: firstLine(cm.Commit.Message),
+			Author:  cm.Commit.Author.Name,
+			Date:    cm.Commit.Author.Date,
+			Repo:    fmt.Sprintf("%s/%s", owner, repo),
+		})
+	}
+	return out
+}
+
+// gitLabCommitsPreview 把拉取到的 GitLab 提交转成最多 20 条的预览列表，供测试连接展示。
+func gitLabCommitsPreview(commits []git.GitLabCommit, projectPath string) []commitPreview {
+	const max = 20
+	out := make([]commitPreview, 0, len(commits))
+	for i, cm := range commits {
+		if i >= max {
+			break
+		}
+		sha := cm.ID
+		if len(sha) > 7 {
+			sha = sha[:7]
+		}
+		out = append(out, commitPreview{
+			SHA:     sha,
+			Message: firstLine(cm.Message),
+			Author:  cm.AuthorName,
+			Date:    cm.CreatedAt,
+			Repo:    projectPath,
+		})
+	}
+	return out
+}
+
 func testDataSourceHandler(c *gin.Context) {
 	userID, _ := c.Cookie("user_id")
 	idStr := c.Param("id")
@@ -1254,7 +1317,8 @@ func testDataSourceHandler(c *gin.Context) {
 		}
 		persistSyncStatus(ds, true, "")
 		c.JSON(200, gin.H{"code": response.CodeOK, "success": true,
-			"message": fmt.Sprintf("GitHub 连接成功，最近 7 天获取到 %d 条提交", len(commits))})
+			"message": fmt.Sprintf("GitHub 连接成功，最近 7 天获取到 %d 条提交", len(commits)),
+			"records": gitHubCommitsPreview(commits, cfg.Owner, cfg.Repo)})
 	case "gitlab":
 		var cfg struct {
 			Token       string `json:"token"`
@@ -1276,7 +1340,8 @@ func testDataSourceHandler(c *gin.Context) {
 		}
 		persistSyncStatus(ds, true, "")
 		c.JSON(200, gin.H{"code": response.CodeOK, "success": true,
-			"message": fmt.Sprintf("GitLab 连接成功，最近 7 天获取到 %d 条提交", len(commits))})
+			"message": fmt.Sprintf("GitLab 连接成功，最近 7 天获取到 %d 条提交", len(commits)),
+			"records": gitLabCommitsPreview(commits, cfg.ProjectPath)})
 	case "lark", "feishu":
 		// 飞书数据源依赖用户 OAuth 授权,检查是否已授权
 		if _, ok := storeDB.GetToken(userID); !ok {

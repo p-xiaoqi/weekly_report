@@ -212,6 +212,7 @@
                 <button class="btn btn-primary" id="btn-add-ds" onclick="showDataSourceModal()">➕ 添加数据源</button>
                 <button class="btn btn-secondary" onclick="refreshDataSources()">🔄 刷新</button>
             </div>
+            <div id="ds-test-preview" style="margin-top:14px;"></div>
         </div>
 
         <!-- 模板管理 -->
@@ -852,9 +853,39 @@
                 const msg = data.message || (ok ? '连接成功' : '连接失败');
                 showToast((ok ? '✅ ' : '❌ ') + msg, ok ? 'success' : 'error');
                 addLog((ok ? '✅ ' : '❌ ') + '数据源测试: ' + msg, ok ? 'success' : 'error');
+                // 展示本次测试拉取到的提交记录（git 数据源），让用户确认确实取到了数据
+                renderTestPreview(id, ok, msg, data.records);
                 // 刷新列表，让状态标签（success/failed）即时更新
                 refreshDataSources();
             } catch (e) { showToast('测试失败: ' + e.message, 'error'); addLog('测试失败: ' + e.message, 'error'); }
+        }
+        // 在数据源区下方渲染“测试连接”拉取到的提交记录预览（仅 git 数据源会返回 records）。
+        function renderTestPreview(id, ok, msg, records) {
+            const box = document.getElementById('ds-test-preview');
+            if (!box) return;
+            const head = `<div style="font-size:13px;margin-bottom:6px;">数据源 #${id} 测试结果：<b style="color:${ok ? '#16a34a' : '#dc2626'}">${escapeHtml(msg)}</b></div>`;
+            if (!Array.isArray(records) || records.length === 0) {
+                // 飞书/手动类型无 records；git 类型成功但 0 条时也给出明确说明
+                box.innerHTML = head + (ok ? '<div style="font-size:12px;color:#666;">（本数据源无可展示的提交记录，或本周窗口内没有提交）</div>' : '');
+                return;
+            }
+            const rows = records.map(r => `
+                <tr>
+                    <td style="padding:4px 8px;font-family:monospace;color:#2563eb;">${escapeHtml(r.sha || '')}</td>
+                    <td style="padding:4px 8px;">${escapeHtml(r.message || '')}</td>
+                    <td style="padding:4px 8px;color:#666;white-space:nowrap;">${escapeHtml(r.author || '')}</td>
+                    <td style="padding:4px 8px;color:#666;white-space:nowrap;">${escapeHtml((r.date || '').slice(0, 10))}</td>
+                </tr>`).join('');
+            box.innerHTML = head + `
+                <div style="font-size:12px;color:#666;margin-bottom:4px;">最近拉取到的提交（最多展示 20 条）：</div>
+                <div style="max-height:240px;overflow:auto;border:1px solid var(--border);border-radius:8px;">
+                    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                        <thead><tr style="background:#f8fafc;text-align:left;">
+                            <th style="padding:6px 8px;">SHA</th><th style="padding:6px 8px;">提交信息</th><th style="padding:6px 8px;">作者</th><th style="padding:6px 8px;">日期</th>
+                        </tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>`;
         }
         function showDataSourceModal() {
             if (!requireLogin()) return;

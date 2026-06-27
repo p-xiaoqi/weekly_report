@@ -376,12 +376,14 @@ func RenderReport(r *model.WeeklyReport, records []model.WorkRecord, nextWeekEve
 func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, nextWeekEvents []model.WorkRecord) string {
 	md := fmt.Sprintf("## 本周完成工作 (%s ~ %s)\n\n", r.WeekStart, r.WeekEnd)
 
-	var tasks, meetings, docs []model.WorkRecord
+	var tasks, commits, meetings, docs []model.WorkRecord
 	for _, rec := range records {
 		if rec.IsHidden {
 			continue
 		}
 		switch rec.RecordType {
+		case model.TypeCommit:
+			commits = append(commits, rec)
 		case model.TypeMeeting:
 			meetings = append(meetings, rec)
 		case model.TypeDoc:
@@ -398,6 +400,23 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 			if rec.Description != "" {
 				md += fmt.Sprintf("  - %s\n", rec.Description)
 			}
+		}
+		md += "\n"
+	}
+
+	if len(commits) > 0 {
+		md += "### 代码提交\n\n"
+		for _, rec := range commits {
+			// 提交信息可能含多行，仅取首行作为标题，避免破坏 Markdown 列表结构。
+			title := rec.Title
+			if idx := strings.IndexAny(title, "\r\n"); idx >= 0 {
+				title = title[:idx]
+			}
+			line := fmt.Sprintf("- 💻 %s", title)
+			if rec.ProjectName != "" {
+				line += fmt.Sprintf("（%s）", rec.ProjectName)
+			}
+			md += line + "\n"
 		}
 		md += "\n"
 	}
@@ -424,7 +443,7 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 		md += "\n"
 	}
 
-	if len(tasks) == 0 && len(meetings) == 0 && len(docs) == 0 {
+	if len(tasks) == 0 && len(commits) == 0 && len(meetings) == 0 && len(docs) == 0 {
 		md += "- 本周暂无记录\n\n"
 	}
 
@@ -458,7 +477,7 @@ func generateID() string {
 
 // buildTemplateData 将工作记录转换为模板可用数据结构
 func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.WorkRecord) model.ReportTemplateData {
-	var tasks, meetings, docs []model.TemplateItem
+	var tasks, commits, meetings, docs []model.TemplateItem
 	for _, rec := range records {
 		if rec.IsHidden {
 			continue
@@ -472,6 +491,8 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 			OccurredDate: rec.OccurredAt.Format("01-02"),
 		}
 		switch rec.RecordType {
+		case model.TypeCommit:
+			commits = append(commits, item)
 		case model.TypeMeeting:
 			meetings = append(meetings, item)
 		case model.TypeDoc:
@@ -500,15 +521,18 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 		WeekEnd:        report.WeekEnd,
 		WeekRange:      report.WeekStart + " ~ " + report.WeekEnd,
 		Tasks:          tasks,
+		Commits:        commits,
 		Meetings:       meetings,
 		Docs:           docs,
 		NextWeekEvents: nextItems,
 		Problems:       problems,
 		TaskCount:      len(tasks),
+		CommitCount:    len(commits),
 		MeetingCount:   len(meetings),
 		DocCount:       len(docs),
 		NextWeekCount:  len(nextItems),
 		HasTasks:       len(tasks) > 0,
+		HasCommits:     len(commits) > 0,
 		HasMeetings:    len(meetings) > 0,
 		HasDocs:        len(docs) > 0,
 		HasNextWeek:    len(nextItems) > 0,

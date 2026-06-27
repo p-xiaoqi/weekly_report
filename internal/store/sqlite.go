@@ -580,12 +580,6 @@ func (s *Store) Transaction(fn func(tx *gorm.DB) error) error {
 // --- 初始化默认模板 ---
 
 func (s *Store) InitDefaultTemplates() error {
-	var count int64
-	s.db.Model(&model.Template{}).Count(&count)
-	if count > 0 {
-		return nil
-	}
-
 	defaults := []model.Template{
 		{
 			Name:        "研发工程师默认模板",
@@ -601,6 +595,11 @@ func (s *Store) InitDefaultTemplates() error {
 {{if .Description}}  - {{.Description}}
 {{end}}{{end}}
 {{end}}
+{{if .HasCommits}}### 代码提交
+
+{{range .Commits}}- 💻 {{.Title}}{{if .ProjectName}}（{{.ProjectName}}）{{end}}
+{{end}}
+{{end}}
 {{if .HasMeetings}}### 会议/日程
 
 {{range .Meetings}}- 🗓️ {{.Title}} ({{.OccurredDate}})
@@ -613,7 +612,7 @@ func (s *Store) InitDefaultTemplates() error {
 {{range .Docs}}- 📝 {{.Title}} ({{.OccurredDate}})
 {{end}}
 {{end}}
-{{if and (not .HasTasks) (not .HasMeetings) (not .HasDocs)}}- 本周暂无记录
+{{if and (not .HasTasks) (not .HasCommits) (not .HasMeetings) (not .HasDocs)}}- 本周暂无记录
 {{end}}
 ## 遇到的问题
 
@@ -641,6 +640,11 @@ func (s *Store) InitDefaultTemplates() error {
 {{if .Description}}  - {{.Description}}
 {{end}}{{end}}
 {{end}}
+{{if .HasCommits}}### 代码提交
+
+{{range .Commits}}- 💻 {{.Title}}{{if .ProjectName}}（{{.ProjectName}}）{{end}}
+{{end}}
+{{end}}
 {{if .HasMeetings}}### 会议/日程
 
 {{range .Meetings}}- {{.Title}} ({{.OccurredDate}})
@@ -651,7 +655,7 @@ func (s *Store) InitDefaultTemplates() error {
 {{range .Docs}}- {{.Title}} ({{.OccurredDate}})
 {{end}}
 {{end}}
-{{if and (not .HasTasks) (not .HasMeetings) (not .HasDocs)}}- 本周暂无记录
+{{if and (not .HasTasks) (not .HasCommits) (not .HasMeetings) (not .HasDocs)}}- 本周暂无记录
 {{end}}
 ## 遇到的问题
 
@@ -664,9 +668,29 @@ func (s *Store) InitDefaultTemplates() error {
 		},
 	}
 
+	// 按名称 upsert 全局默认模板：不存在则创建，已存在则刷新内容/描述，
+	// 这样升级（如新增“代码提交”分类）能落到已存在的数据库，而不会跳过初始化；
+	// 全局默认模板不归属任何用户、用户也不可编辑，刷新是安全的。
 	for i := range defaults {
-		if err := s.db.Create(&defaults[i]).Error; err != nil {
-			log.Printf("[ERROR] InitDefaultTemplates failed: %v", err)
+		d := defaults[i]
+		var existing model.Template
+		err := s.db.Where("name = ? AND scope = ?", d.Name, "global").First(&existing).Error
+		if err == gorm.ErrRecordNotFound {
+			if cerr := s.db.Create(&d).Error; cerr != nil {
+				log.Printf("[ERROR] InitDefaultTemplates create %q failed: %v", d.Name, cerr)
+			}
+			continue
+		}
+		if err != nil {
+			log.Printf("[ERROR] InitDefaultTemplates lookup %q failed: %v", d.Name, err)
+			continue
+		}
+		existing.Description = d.Description
+		existing.Role = d.Role
+		existing.IsDefault = d.IsDefault
+		existing.Content = d.Content
+		if uerr := s.db.Save(&existing).Error; uerr != nil {
+			log.Printf("[ERROR] InitDefaultTemplates update %q failed: %v", d.Name, uerr)
 		}
 	}
 	return nil

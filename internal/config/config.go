@@ -115,6 +115,21 @@ func Load() (*Config, error) {
 	if v := os.Getenv("ADMIN_OPEN_IDS"); v != "" {
 		cfg.Admin.OpenIDs = v
 	}
+	// 机器人 webhook / secret 的环境变量兜底（兼容 FEISHU_BOT_WEBHOOK 与 REMINDER_BOT_WEBHOOK 两种命名）
+	if cfg.Reminder.BotWebhook == "" {
+		if v := os.Getenv("FEISHU_BOT_WEBHOOK"); v != "" {
+			cfg.Reminder.BotWebhook = v
+		} else if v := os.Getenv("REMINDER_BOT_WEBHOOK"); v != "" {
+			cfg.Reminder.BotWebhook = v
+		}
+	}
+	if cfg.Reminder.BotSecret == "" {
+		if v := os.Getenv("REMINDER_BOT_SECRET"); v != "" {
+			cfg.Reminder.BotSecret = v
+		} else if v := os.Getenv("FEISHU_BOT_SECRET"); v != "" {
+			cfg.Reminder.BotSecret = v
+		}
+	}
 
 	// 默认值
 	if cfg.Server.Port == "" {

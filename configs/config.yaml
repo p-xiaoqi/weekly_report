@@ -24,7 +24,7 @@ reminder:
   enabled: true
   cron: "0 0 10 * * 5"
   bot_webhook: "${FEISHU_BOT_WEBHOOK}"
-  bot_secret: ""
+  bot_secret: "${REMINDER_BOT_SECRET}"
 
 # 管理员白名单（用于 /api/v1/admin/* 接口，如"测试提醒"）。
 # 与"飞书群管理员"无关：这是本系统自有的管理员授权名单。
