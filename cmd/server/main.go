@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -161,6 +162,17 @@ func adminMiddleware() gin.HandlerFunc {
 		if role == "admin" || cfg.IsAdmin(email, userID) {
 			c.Next()
 			return
+		}
+		// Bootstrap 兜底：未配置任何管理员白名单且系统中还没有管理员时，
+		// 把当前登录用户提升为管理员并放行（无需重新登录）。
+		if cfg.Admin.Emails == "" && cfg.Admin.OpenIDs == "" && userID != "" {
+			if n, err := storeDB.CountAdmins(); err == nil && n == 0 {
+				if err := storeDB.SetUserRole(userID, "admin"); err == nil {
+					log.Printf("[bootstrap] 未配置管理员白名单，已将当前用户(%s)提升为管理员", userID)
+					c.Next()
+					return
+				}
+			}
 		}
 		// 把"当前检测到的身份"回显出来，方便用户比对：通常是配置的 open_id 与
 		// 实际登录用户的 open_id 不一致，或 .env 未被加载 / 服务未重启。
@@ -441,6 +453,16 @@ func larkCallbackHandler(c *gin.Context) {
 	if err := storeDB.CreateOrUpdateUser(user); err != nil {
 		response.FailInternal(c, "保存用户失败: "+err.Error())
 		return
+	}
+
+	// Bootstrap：若未配置任何管理员白名单，且系统中还没有管理员，
+	// 则把首位登录用户设为管理员，避免因 .env 未生效导致无人能用管理工具。
+	if cfg.Admin.Emails == "" && cfg.Admin.OpenIDs == "" {
+		if n, err := storeDB.CountAdmins(); err == nil && n == 0 {
+			if err := storeDB.SetUserRole(userTokenInfo.OpenID, "admin"); err == nil {
+				log.Printf("[bootstrap] 未配置管理员白名单，已将首位登录用户(%s)设为管理员", userTokenInfo.OpenID)
+			}
+		}
 	}
 
 	// JWT

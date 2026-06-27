@@ -330,6 +330,18 @@ func (s *Store) GetUserByID(id uint) (*model.User, error) {
 	return &user, nil
 }
 
+// CountAdmins 统计系统内 Role=admin 的用户数量（用于"首位用户引导为管理员"）。
+func (s *Store) CountAdmins() (int64, error) {
+	var n int64
+	err := s.db.Model(&model.User{}).Where("role = ?", "admin").Count(&n).Error
+	return n, err
+}
+
+// SetUserRole 设置指定飞书 open_id 用户的角色。
+func (s *Store) SetUserRole(openID, role string) error {
+	return s.db.Model(&model.User{}).Where("feishu_open_id = ?", openID).Update("role", role).Error
+}
+
 // --- 新增：数据源配置管理 ---
 
 func (s *Store) CreateDataSource(ds *model.DataSource) error {
