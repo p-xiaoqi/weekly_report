@@ -315,6 +315,9 @@ func main() {
 		authorized.PUT("/api/v1/templates/:id", updateTemplateHandler)
 		authorized.DELETE("/api/v1/templates/:id", deleteTemplateHandler)
 
+		// 飞书：获取当前授权用户所在的群列表（chat_id + 名称），用于选择通知目标群
+		authorized.GET("/api/v1/feishu/chats", listChatsHandler)
+
 		// 提醒测试（仅管理员可调用）
 		admin := authorized.Group("/api/v1/admin")
 		admin.Use(adminMiddleware())
@@ -1508,6 +1511,25 @@ func deleteTemplateHandler(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "message": "模板删除成功"})
+}
+
+// listChatsHandler 返回当前授权用户所在的飞书群列表（chat_id + 名称），
+// 便于用户挑选要接收周报提醒的群（可多选，配置到 REMINDER_CHAT_ID，逗号分隔）。
+func listChatsHandler(c *gin.Context) {
+	userID, _ := c.Cookie("user_id")
+	token, ok := storeDB.GetToken(userID)
+	if !ok {
+		response.Fail(c, http.StatusUnauthorized, response.CodeTokenExpired, "飞书授权已过期，请重新登录后再获取群列表")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	chats, err := larkClient.ListUserChats(ctx, token)
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, err.Error())
+		return
+	}
+	c.JSON(200, gin.H{"code": 0, "data": chats})
 }
 
 func testRemindHandler(c *gin.Context) {

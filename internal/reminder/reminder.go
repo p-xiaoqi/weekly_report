@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -35,7 +36,7 @@ type ReminderService struct {
 	// 应用身份发消息（可选）：配置后优先于 webhook。
 	appSender AppSender
 	useApp    bool
-	chatID    string // 定时提醒目标群；为空则逐一私信未提交用户
+	chatIDs   []string // 定时提醒目标群（可多个）；为空则逐一私信未提交用户
 }
 
 // NewReminderService 创建提醒服务
@@ -46,10 +47,22 @@ func NewReminderService(s *store.Store) *ReminderService {
 }
 
 // SetAppSender 注入应用身份发送器，启用"App ID+Secret"发消息模式。
-func (r *ReminderService) SetAppSender(sender AppSender, useApp bool, chatID string) {
+// chatIDs 支持逗号分隔的多个群（oc_xxx），用于多群通知。
+func (r *ReminderService) SetAppSender(sender AppSender, useApp bool, chatIDs string) {
 	r.appSender = sender
 	r.useApp = useApp
-	r.chatID = chatID
+	r.chatIDs = splitCSV(chatIDs)
+}
+
+// splitCSV 把逗号分隔字符串拆成去空白、去空项的切片。
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // appEnabled 是否走应用身份发消息。
@@ -103,10 +116,12 @@ func (r *ReminderService) Start(spec string, botWebhook string, botSecret string
 
 		switch {
 		case r.appEnabled():
-			if r.chatID != "" {
-				// 发送到指定群
-				if err := r.appSender.SendMessage(context.Background(), "chat_id", r.chatID, content); err != nil {
-					log.Printf("[Reminder] 应用身份发送群消息失败: %v", err)
+			if len(r.chatIDs) > 0 {
+				// 发送到一个或多个指定群
+				for _, cid := range r.chatIDs {
+					if err := r.appSender.SendMessage(context.Background(), "chat_id", cid, content); err != nil {
+						log.Printf("[Reminder] 应用身份发送群(%s)消息失败: %v", cid, err)
+					}
 				}
 			} else {
 				// 逐一私信未提交用户本人
@@ -202,8 +217,14 @@ func (r *ReminderService) SendTest(ctx context.Context, toOpenID, webhook, secre
 		content = "🧪 这是周报系统的测试消息"
 	}
 	if r.appEnabled() {
-		if r.chatID != "" {
-			return r.appSender.SendMessage(ctx, "chat_id", r.chatID, content)
+		if len(r.chatIDs) > 0 {
+			var firstErr error
+			for _, cid := range r.chatIDs {
+				if err := r.appSender.SendMessage(ctx, "chat_id", cid, content); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			return firstErr
 		}
 		if toOpenID == "" {
 			return fmt.Errorf("应用身份发送需要接收者 open_id（请重新登录后重试）")

@@ -28,7 +28,7 @@ reminder:
   # use_app=true 时改用"应用身份(App ID/Secret)"经 im API 发消息，无需 webhook 加签。
   # 测试提醒会私信当前登录管理员本人；定时提醒发到 chat_id（留空则逐一私信未提交用户）。
   use_app: false        # 也可用环境变量 REMINDER_USE_APP=true 开启
-  chat_id: "${REMINDER_CHAT_ID}"  # 定时提醒目标群 chat_id（oc_xxx），可留空
+  chat_id: "${REMINDER_CHAT_ID}"  # 定时提醒目标群 chat_id（oc_xxx），支持逗号分隔多个群，可留空
 
 # 管理员白名单（用于 /api/v1/admin/* 接口，如"测试提醒"）。
 # 与"飞书群管理员"无关：这是本系统自有的管理员授权名单。

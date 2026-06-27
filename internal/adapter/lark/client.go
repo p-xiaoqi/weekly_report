@@ -88,7 +88,78 @@ func (c *Client) SendMessage(ctx context.Context, receiveIDType, receiveID, text
 	return nil
 }
 
+// ChatInfo 群聊信息（用于让用户选择通知目标群）。
+type ChatInfo struct {
+	ChatID      string `json:"chat_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Avatar      string `json:"avatar"`
+}
+
+// ListUserChats 拉取授权用户所在的群列表（chat_id + 名称）。
+// 传入 user_access_token 时返回该用户加入的群；为空则回退 tenant_access_token（返回机器人所在群）。
+func (c *Client) ListUserChats(ctx context.Context, userAccessToken string) ([]ChatInfo, error) {
+	token := userAccessToken
+	if token == "" {
+		var err error
+		token, err = c.getTenantToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var all []ChatInfo
+	pageToken := ""
+	for {
+		url := "https://open.feishu.cn/open-apis/im/v1/chats?page_size=100"
+		if pageToken != "" {
+			url += "&page_token=" + pageToken
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		var result struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+			Data struct {
+				Items     []ChatInfo `json:"items"`
+				PageToken string     `json:"page_token"`
+				HasMore   bool       `json:"has_more"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("群列表响应无法解析(HTTP %d): %s", resp.StatusCode, string(body))
+		}
+		if result.Code != 0 {
+			hint := ""
+			switch result.Code {
+			case 99991663, 99991661, 99991664:
+				hint = "（飞书登录态已过期，请重新登录后重试）"
+			case 9499:
+				hint = "（应用缺少 im:chat 权限，请在开放平台开通并发布版本）"
+			}
+			return nil, fmt.Errorf("获取群列表失败 code=%d msg=%s%s", result.Code, result.Msg, hint)
+		}
+		all = append(all, result.Data.Items...)
+		if !result.Data.HasMore {
+			break
+		}
+		pageToken = result.Data.PageToken
+	}
+	return all, nil
+}
+
 func (c *Client) getTenantToken(ctx context.Context) (string, error) {
+
 	c.mu.RLock()
 	if c.tenantToken != "" && time.Now().Before(c.tokenExpire.Add(-5*time.Minute)) {
 		t := c.tenantToken

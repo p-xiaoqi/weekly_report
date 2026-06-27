@@ -201,7 +201,9 @@
             <div class="card-title">🛠️ 管理工具</div>
             <div class="btn-group">
                 <button class="btn btn-warning" id="btn-remind" onclick="testRemind()">🔔 测试提醒</button>
+                <button class="btn" id="btn-chats" onclick="loadMyChats()">💬 获取我的群聊</button>
             </div>
+            <div id="chat-list" style="margin-top:10px;"></div>
         </div>
 
         <!-- 数据源管理 -->
@@ -763,6 +765,50 @@
                 if (data.code === 0) { showToast(data.message || '提醒发送成功', 'success'); addLog('🔔 ' + (data.message || '提醒发送成功'), 'success'); }
                 else { showToast(data.error || '提醒发送失败', 'error'); addLog('提醒发送失败: ' + (data.error || ''), 'error'); }
             } catch (e) { showToast('提醒发送失败: ' + e.message, 'error'); addLog('提醒发送失败: ' + e.message, 'error'); }
+        }
+
+        // ---------- 获取我的群聊 ----------
+        async function loadMyChats() {
+            if (!requireLogin()) return;
+            const box = document.getElementById('chat-list');
+            box.innerHTML = '<span style="color:#888">加载中…</span>';
+            try {
+                const res = await fetch('/api/v1/feishu/chats', { credentials: 'include' });
+                const data = await res.json();
+                if (data.code !== 0) {
+                    box.innerHTML = '<span style="color:#c0392b">' + escapeHtml(data.error || '获取失败') + '</span>';
+                    addLog('获取群聊失败: ' + (data.error || ''), 'error');
+                    return;
+                }
+                const chats = data.data || [];
+                if (chats.length === 0) {
+                    box.innerHTML = '<span style="color:#888">没有找到群聊（机器人/你需要先加入群，并确认应用已开通 im:chat 权限）</span>';
+                    return;
+                }
+                let html = '<div style="font-size:12px;color:#666;margin-bottom:6px;">点击复制 chat_id；多群通知把多个 id 用英文逗号拼到 REMINDER_CHAT_ID</div>';
+                html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+                html += '<tr style="background:#f5f5f5;"><th style="text-align:left;padding:4px 6px;">群名称</th><th style="text-align:left;padding:4px 6px;">chat_id</th><th></th></tr>';
+                chats.forEach(ch => {
+                    const cid = escapeHtml(ch.chat_id);
+                    html += '<tr style="border-top:1px solid #eee;">'
+                        + '<td style="padding:4px 6px;">' + escapeHtml(ch.name || '(未命名)') + '</td>'
+                        + '<td style="padding:4px 6px;font-family:monospace;">' + cid + '</td>'
+                        + '<td style="padding:4px 6px;"><button class="btn" style="padding:2px 8px;font-size:12px;" onclick="copyText(\'' + cid + '\')">复制</button></td>'
+                        + '</tr>';
+                });
+                html += '</table>';
+                box.innerHTML = html;
+                addLog('💬 获取到 ' + chats.length + ' 个群聊', 'success');
+            } catch (e) {
+                box.innerHTML = '<span style="color:#c0392b">' + escapeHtml(e.message) + '</span>';
+                addLog('获取群聊失败: ' + e.message, 'error');
+            }
+        }
+
+        function copyText(t) {
+            (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject())
+                .then(() => showToast('已复制: ' + t, 'success'))
+                .catch(() => showToast('复制失败，请手动选择：' + t, 'warn'));
         }
 
         // ---------- 数据源 ----------
