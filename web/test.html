@@ -244,10 +244,10 @@
             <input type="hidden" id="ds-id" />
             <div class="form-group">
                 <label>类型</label>
-                <select id="ds-type">
-                    <option value="lark">🔵 飞书</option>
+                <select id="ds-type" onchange="onDsTypeChange()">
                     <option value="github">🐙 GitHub</option>
                     <option value="gitlab">🦊 GitLab</option>
+                    <option value="lark">🔵 飞书</option>
                     <option value="manual">📝 手动</option>
                 </select>
             </div>
@@ -257,7 +257,8 @@
             </div>
             <div class="form-group">
                 <label>配置（JSON）</label>
-                <textarea id="ds-config" rows="4" placeholder='{"url":"https://example.com","token":"xxx"}'></textarea>
+                <textarea id="ds-config" rows="6" placeholder='{"token":"...","owner":"...","repo":"..."}'></textarea>
+                <div id="ds-config-hint" style="font-size:12px;color:#666;margin-top:6px;line-height:1.6;"></div>
             </div>
             <div class="btn-group">
                 <button class="btn btn-primary" onclick="saveDataSource()">💾 保存</button>
@@ -764,6 +765,48 @@
         }
 
         // ---------- 数据源 ----------
+        // 各类型数据源的配置 JSON 模板与字段说明，用于在“数据源配置”弹窗中
+        // 根据所选类型动态给出正确的格式提示，避免用户乱填或类型选错。
+        const DS_CONFIG_SCHEMA = {
+            github: {
+                template: { token: 'ghp_xxx (有 repo 读权限的 PAT)', owner: 'p-xiaoqi', repo: 'weekly_report', author: '' },
+                hint: 'GitHub 提交记录数据源。<br>' +
+                    '• <b>token</b>：GitHub Personal Access Token（私有仓库必填，公开仓库可留空但易触发限流）<br>' +
+                    '• <b>owner</b>：仓库所有者，如 <code>p-xiaoqi</code><br>' +
+                    '• <b>repo</b>：仓库名，如 <code>weekly_report</code><br>' +
+                    '• <b>author</b>：可选，按提交作者邮箱/用户名过滤；留空则取本周窗口内全部提交'
+            },
+            gitlab: {
+                template: { token: 'glpat_xxx', server_url: 'https://gitlab.com', project_path: 'group/project', email: '' },
+                hint: 'GitLab 提交记录数据源。<br>' +
+                    '• <b>token</b>：GitLab Private Token（PRIVATE-TOKEN）<br>' +
+                    '• <b>server_url</b>：GitLab 地址，如 <code>https://gitlab.com</code><br>' +
+                    '• <b>project_path</b>：项目路径，如 <code>group/project</code><br>' +
+                    '• <b>email</b>：可选，按提交作者邮箱过滤；留空则取本周窗口内全部提交'
+            },
+            lark: {
+                template: {},
+                hint: '飞书数据源（任务/会议/文档）无需填写配置，凭证来自飞书登录授权。<br>配置框可留空 <code>{}</code>。'
+            },
+            manual: {
+                template: {},
+                hint: '手动 / 浏览器插件推送的数据源，无需配置，配置框留空 <code>{}</code> 即可。'
+            }
+        };
+        // 切换类型时刷新配置框的格式提示，并在配置框为空时自动填入对应模板，方便用户照填。
+        function onDsTypeChange() {
+            const type = document.getElementById('ds-type').value;
+            const schema = DS_CONFIG_SCHEMA[type] || { template: {}, hint: '' };
+            const hintEl = document.getElementById('ds-config-hint');
+            if (hintEl) hintEl.innerHTML = schema.hint;
+            const cfgEl = document.getElementById('ds-config');
+            const cur = (cfgEl.value || '').trim();
+            // 仅当配置框为空、或仍是其它类型自动填入的模板时，才覆盖为新类型模板，避免覆盖用户已输入内容。
+            const isAutoTemplate = cur === '' || cur === '{}' || Object.values(DS_CONFIG_SCHEMA).some(s => cur === JSON.stringify(s.template, null, 2));
+            if (isAutoTemplate) {
+                cfgEl.value = Object.keys(schema.template).length ? JSON.stringify(schema.template, null, 2) : '{}';
+            }
+        }
         async function refreshDataSources() {
             const list = document.getElementById('datasource-list');
             if (!isLoggedIn) {
@@ -816,9 +859,10 @@
         function showDataSourceModal() {
             if (!requireLogin()) return;
             document.getElementById('ds-id').value = '';
-            document.getElementById('ds-type').value = 'lark';
+            document.getElementById('ds-type').value = 'github';
             document.getElementById('ds-name').value = '';
             document.getElementById('ds-config').value = '';
+            onDsTypeChange();
             document.getElementById('ds-modal').classList.remove('hidden');
         }
         function closeDataSourceModal() { document.getElementById('ds-modal').classList.add('hidden'); }
@@ -831,17 +875,37 @@
                     document.getElementById('ds-type').value = data.data.type;
                     document.getElementById('ds-name').value = data.data.name;
                     document.getElementById('ds-config').value = data.data.config;
+                    // 仅刷新格式提示，不覆盖已有配置内容
+                    const schema = DS_CONFIG_SCHEMA[data.data.type];
+                    const hintEl = document.getElementById('ds-config-hint');
+                    if (hintEl) hintEl.innerHTML = schema ? schema.hint : '';
                     document.getElementById('ds-modal').classList.remove('hidden');
                 }
             } catch (e) { showToast('加载失败: ' + e.message, 'error'); }
         }
+        // 各类型保存前的必填字段校验，给出明确报错，避免“类型选错 / 字段缺失”导致测试连接误判。
+        const DS_REQUIRED_FIELDS = {
+            github: ['token', 'owner', 'repo'],
+            gitlab: ['token', 'server_url', 'project_path']
+        };
         async function saveDataSource() {
             const id = document.getElementById('ds-id').value;
-            const payload = {
-                type: document.getElementById('ds-type').value,
-                name: document.getElementById('ds-name').value,
-                config: JSON.parse(document.getElementById('ds-config').value || '{}')
-            };
+            const type = document.getElementById('ds-type').value;
+            const raw = document.getElementById('ds-config').value || '{}';
+            let config;
+            try {
+                config = JSON.parse(raw);
+            } catch (e) {
+                showToast('配置不是合法 JSON：' + e.message, 'error');
+                return;
+            }
+            const required = DS_REQUIRED_FIELDS[type] || [];
+            const missing = required.filter(k => !config[k] || String(config[k]).trim() === '' || String(config[k]).includes('xxx') || String(config[k]).includes('...'));
+            if (missing.length) {
+                showToast(`${type} 数据源缺少必填字段或仍是示例值：${missing.join('、')}`, 'error');
+                return;
+            }
+            const payload = { type, name: document.getElementById('ds-name').value, config };
             try {
                 const url = id ? `/api/v1/datasources/${id}` : '/api/v1/datasources';
                 const method = id ? 'PUT' : 'POST';
