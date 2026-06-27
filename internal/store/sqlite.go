@@ -367,6 +367,13 @@ func (s *Store) SaveWorkRecords(records []model.WorkRecord) error {
 		return nil
 	}
 	for i := range records {
+		// 仅当存在稳定的 ExternalID 时才做去重 upsert（lark 任务/日历/文档、git 提交等）。
+		// 手动录入 / 浏览器插件推送的记录没有 ExternalID，若按空 external_id 去重，
+		// 同一 (user, source) 下的多条记录会互相覆盖，导致只剩最后一条（数据丢失）。
+		if records[i].ExternalID == "" {
+			s.db.Create(&records[i])
+			continue
+		}
 		var existing model.WorkRecord
 		err := s.db.Where("user_id = ? AND source_type = ? AND external_id = ?", records[i].UserID, records[i].SourceType, records[i].ExternalID).First(&existing).Error
 		if err == nil {
@@ -407,9 +414,11 @@ func (s *Store) GetReportVersions(reportID string) ([]model.WeeklyReportVersion,
 
 // --- 新增：模板 ---
 
-func (s *Store) GetTemplates(role string) ([]model.Template, error) {
+// GetTemplates 返回当前用户可见的模板：全局/默认模板（scope=global 或 is_default）
+// 加上该用户自己的个人模板（user_id = userID）。不返回其他用户的个人模板。
+func (s *Store) GetTemplates(role, userID string) ([]model.Template, error) {
 	var templates []model.Template
-	q := s.db.Where("scope = ? OR scope = ?", "global", "personal")
+	q := s.db.Where("scope = ? OR is_default = ? OR user_id = ?", "global", true, userID)
 	if role != "" {
 		q = q.Where("role = ? OR role = ?", role, "")
 	}
@@ -486,12 +495,13 @@ func (s *Store) SaveCronJob(job *model.CronJob) error {
 
 func (s *Store) GetWeeklyStats(userID string, weeks int) ([]map[string]interface{}, error) {
 	var results []map[string]interface{}
+	// manual 记录与 task 合并统计，与 compareReportHandler 的归类规则保持一致（manual 计入任务桶）。
 	sql := fmt.Sprintf(`SELECT week_start,
 		SUM(CASE WHEN record_type = 'commit' THEN 1 ELSE 0 END) as commit_count,
-		SUM(CASE WHEN record_type = 'task' THEN 1 ELSE 0 END) as task_count,
+		SUM(CASE WHEN record_type = 'task' OR record_type = 'manual' THEN 1 ELSE 0 END) as task_count,
 		SUM(CASE WHEN record_type = 'meeting' THEN 1 ELSE 0 END) as meeting_count
 		FROM work_records
-		WHERE user_id = ?
+		WHERE user_id = ? AND is_hidden = 0
 		GROUP BY week_start
 		ORDER BY week_start DESC
 		LIMIT %d`, weeks)

@@ -41,6 +41,49 @@ type Config struct {
 		BotWebhook string `yaml:"bot_webhook"`
 		BotSecret  string `yaml:"bot_secret"`
 	} `yaml:"reminder"`
+	// Admin 管理员白名单（用于 /api/v1/admin/* 接口的鉴权）。
+	// 与"飞书群管理员"无关：此处指本系统自己的管理员授权名单。
+	// Emails / OpenIDs 均为逗号分隔字符串，可由 yaml 或环境变量
+	// ADMIN_EMAILS / ADMIN_OPEN_IDS 提供。
+	Admin struct {
+		Emails  string `yaml:"emails"`
+		OpenIDs string `yaml:"open_ids"`
+	} `yaml:"admin"`
+}
+
+// IsAdmin 判断给定 email 或飞书 open_id 是否在管理员白名单中。
+// email 比较大小写不敏感；open_id 精确匹配。
+func (c *Config) IsAdmin(email, openID string) bool {
+	if email != "" && csvContains(c.Admin.Emails, email, true) {
+		return true
+	}
+	if openID != "" && csvContains(c.Admin.OpenIDs, openID, false) {
+		return true
+	}
+	return false
+}
+
+// csvContains 判断逗号分隔列表 list 是否包含 target；ignoreCase 控制是否忽略大小写。
+func csvContains(list, target string, ignoreCase bool) bool {
+	if list == "" || target == "" {
+		return false
+	}
+	if ignoreCase {
+		target = strings.ToLower(target)
+	}
+	for _, item := range strings.Split(list, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if ignoreCase {
+			item = strings.ToLower(item)
+		}
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 func Load() (*Config, error) {
@@ -63,6 +106,15 @@ func Load() (*Config, error) {
 	cfg.JWT.Secret = resolveEnv(cfg.JWT.Secret)
 	cfg.Reminder.BotWebhook = resolveEnv(cfg.Reminder.BotWebhook)
 	cfg.Reminder.BotSecret = resolveEnv(cfg.Reminder.BotSecret)
+	cfg.Admin.Emails = resolveEnv(cfg.Admin.Emails)
+	cfg.Admin.OpenIDs = resolveEnv(cfg.Admin.OpenIDs)
+	// 环境变量直接提供时优先覆盖（兼容未在 yaml 中使用 ${...} 占位的情况）
+	if v := os.Getenv("ADMIN_EMAILS"); v != "" {
+		cfg.Admin.Emails = v
+	}
+	if v := os.Getenv("ADMIN_OPEN_IDS"); v != "" {
+		cfg.Admin.OpenIDs = v
+	}
 
 	// 默认值
 	if cfg.Server.Port == "" {

@@ -189,172 +189,153 @@ func (c *Collector) Collect(ctx context.Context, req model.CollectionRequest) (*
 
 }
 
+// markSync 在一次数据源拉取后更新其同步状态（SyncStatus/LastSyncAt/SyncError），
+// 使前端的数据源状态标签能够反映真实的连接结果。owner-scoped：ds 来自当前用户。
+func (c *Collector) markSync(ds *model.DataSource, ok bool, errMsg string) {
+	now := time.Now()
+	if ok {
+		ds.SyncStatus = "success"
+		ds.SyncError = ""
+	} else {
+		ds.SyncStatus = "failed"
+		ds.SyncError = errMsg
+	}
+	ds.LastSyncAt = &now
+	if err := c.store.UpdateDataSource(ds); err != nil {
+		log.Printf("[WARN] update datasource %q sync status failed: %v", ds.Name, err)
+	}
+}
+
 func (c *Collector) fetchGitLab(ctx context.Context, userID string, weekStart, weekEnd time.Time) ([]model.WorkRecord, []string) {
-
 	dss, err := c.store.GetDataSources(userID)
-
 	if err != nil {
-
 		return nil, []string{fmt.Sprintf("gitlab: 读取数据源配置失败: %v", err)}
-
 	}
 
 	var records []model.WorkRecord
-
 	var warnings []string
 
-	for _, ds := range dss {
-
+	for i := range dss {
+		ds := &dss[i]
 		if ds.Type != "gitlab" || !ds.Enabled {
-
 			continue
-
 		}
 
 		var cfg struct {
-			Token string `json:"token"`
-
-			ServerURL string `json:"server_url"`
-
+			Token       string `json:"token"`
+			ServerURL   string `json:"server_url"`
 			ProjectPath string `json:"project_path"`
-
-			Email string `json:"email"`
+			Email       string `json:"email"`
 		}
-
 		if err := json.Unmarshal([]byte(ds.Config), &cfg); err != nil {
-
 			warnings = append(warnings, fmt.Sprintf("gitlab 数据源 %q 配置解析失败: %v", ds.Name, err))
-
+			c.markSync(ds, false, "配置解析失败: "+err.Error())
 			continue
-
 		}
 
 		source := &git.GitLabSource{
-
-			Token: cfg.Token,
-
-			ServerURL: cfg.ServerURL,
-
+			Token:       cfg.Token,
+			ServerURL:   cfg.ServerURL,
 			ProjectPath: cfg.ProjectPath,
 		}
 
+		// 作者过滤是可选的：仅当显式配置了 email 时才按作者过滤，否则返回窗口内全部提交。
 		commits, err := source.FetchCommits(ctx, cfg.Email, weekStart, weekEnd)
-
 		if err != nil {
-
-			warnings = append(warnings, fmt.Sprintf("gitlab fetch failed (数据源 %q): %v", ds.Name, err))
-
+			warnings = append(warnings, fmt.Sprintf("gitlab 数据源 %q 拉取失败（请检查网络连通性 / Token / 项目路径配置）: %v", ds.Name, err))
+			c.markSync(ds, false, err.Error())
 			continue
+		}
 
+		if len(commits) == 0 {
+			hint := ""
+			if cfg.Email != "" {
+				hint = fmt.Sprintf("（已按作者 email=%s 过滤，请确认与 git 提交作者一致）", cfg.Email)
+			}
+			warnings = append(warnings, fmt.Sprintf("gitlab 数据源 %q 连接成功，但本周（%s ~ %s）没有匹配到任何提交%s",
+				ds.Name, weekStart.Format("2006-01-02"), weekEnd.Format("2006-01-02"), hint))
 		}
 
 		for _, commit := range commits {
-
 			records = append(records, model.WorkRecord{
-
-				SourceType: "gitlab",
-
-				ExternalID: commit.ID,
-
-				RecordType: model.TypeCommit,
-
-				Title: commit.Message,
-
+				SourceType:  "gitlab",
+				ExternalID:  commit.ID,
+				RecordType:  model.TypeCommit,
+				Title:       commit.Message,
 				ProjectName: cfg.ProjectPath,
-
-				OccurredAt: parseGitTime(commit.CreatedAt),
+				OccurredAt:  parseGitTime(commit.CreatedAt),
 			})
-
 		}
-
+		c.markSync(ds, true, "")
 	}
 
 	return records, warnings
-
 }
 
 func (c *Collector) fetchGitHub(ctx context.Context, userID string, weekStart, weekEnd time.Time) ([]model.WorkRecord, []string) {
-
 	dss, err := c.store.GetDataSources(userID)
-
 	if err != nil {
-
 		return nil, []string{fmt.Sprintf("github: 读取数据源配置失败: %v", err)}
-
 	}
 
 	var records []model.WorkRecord
-
 	var warnings []string
 
-	for _, ds := range dss {
-
+	for i := range dss {
+		ds := &dss[i]
 		if ds.Type != "github" || !ds.Enabled {
-
 			continue
-
 		}
 
 		var cfg struct {
-			Token string `json:"token"`
-
-			Owner string `json:"owner"`
-
-			Repo string `json:"repo"`
-
+			Token  string `json:"token"`
+			Owner  string `json:"owner"`
+			Repo   string `json:"repo"`
 			Author string `json:"author"`
 		}
-
 		if err := json.Unmarshal([]byte(ds.Config), &cfg); err != nil {
-
 			warnings = append(warnings, fmt.Sprintf("github 数据源 %q 配置解析失败: %v", ds.Name, err))
-
+			c.markSync(ds, false, "配置解析失败: "+err.Error())
 			continue
-
 		}
 
 		source := &git.GitHubSource{
-
 			Token: cfg.Token,
-
 			Owner: cfg.Owner,
-
-			Repo: cfg.Repo,
+			Repo:  cfg.Repo,
 		}
 
+		// 作者过滤是可选的：仅当显式配置了 author 时才按作者过滤，否则返回窗口内全部提交。
 		commits, err := source.FetchCommits(ctx, cfg.Author, weekStart, weekEnd)
-
 		if err != nil {
-
-			warnings = append(warnings, fmt.Sprintf("github fetch failed (数据源 %q): %v", ds.Name, err))
-
+			warnings = append(warnings, fmt.Sprintf("github 数据源 %q 拉取失败（请检查网络连通性 / Token / owner、repo 配置）: %v", ds.Name, err))
+			c.markSync(ds, false, err.Error())
 			continue
+		}
 
+		if len(commits) == 0 {
+			hint := ""
+			if cfg.Author != "" {
+				hint = fmt.Sprintf("（已按作者 author=%s 过滤，请确认与 git 提交作者一致）", cfg.Author)
+			}
+			warnings = append(warnings, fmt.Sprintf("github 数据源 %q 连接成功，但本周（%s ~ %s）没有匹配到任何提交%s",
+				ds.Name, weekStart.Format("2006-01-02"), weekEnd.Format("2006-01-02"), hint))
 		}
 
 		for _, commit := range commits {
-
 			records = append(records, model.WorkRecord{
-
-				SourceType: "github",
-
-				ExternalID: commit.SHA,
-
-				RecordType: model.TypeCommit,
-
-				Title: commit.Commit.Message,
-
+				SourceType:  "github",
+				ExternalID:  commit.SHA,
+				RecordType:  model.TypeCommit,
+				Title:       commit.Commit.Message,
 				ProjectName: fmt.Sprintf("%s/%s", cfg.Owner, cfg.Repo),
-
-				OccurredAt: parseGitTime(commit.Commit.Author.Date),
+				OccurredAt:  parseGitTime(commit.Commit.Author.Date),
 			})
-
 		}
-
+		c.markSync(ds, true, "")
 	}
 
 	return records, warnings
-
 }
 
 func parseGitTime(s string) time.Time {

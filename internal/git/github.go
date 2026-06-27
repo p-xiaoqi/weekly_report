@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -28,13 +29,18 @@ type GitHubSource struct {
 	Repo  string
 }
 
-// FetchCommits 分页拉取本周提交
+// FetchCommits 分页拉取本周提交。
+// author 为可选的作者过滤条件：仅当非空时才通过 GitHub API 的 author 参数按作者过滤，
+// 为空（默认）时返回时间窗口内的全部提交，避免因未配置/错配作者而漏掉提交。
 func (g *GitHubSource) FetchCommits(ctx context.Context, author string, weekStart, weekEnd time.Time) ([]GitHubCommit, error) {
 	var allCommits []GitHubCommit
 	page := 1
 	for {
 		apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits?since=%s&until=%s&per_page=100&page=%d",
 			g.Owner, g.Repo, weekStart.Format(time.RFC3339), weekEnd.Format(time.RFC3339), page)
+		if author != "" {
+			apiURL += "&author=" + url.QueryEscape(author)
+		}
 
 		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 		if err != nil {

@@ -125,6 +125,7 @@ type WeeklyReportVersion struct {
 // Template 模板表
 type Template struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
+	UserID      string    `gorm:"index" json:"user_id"` // 个人模板归属用户（飞书 OpenID）；全局/默认模板为空
 	Name        string    `gorm:"not null" json:"name"`
 	Description string    `json:"description"`
 	Content     string    `gorm:"type:text;not null" json:"content"` // Go Template 内容

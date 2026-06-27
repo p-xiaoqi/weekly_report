@@ -144,18 +144,26 @@ func authMiddleware() gin.HandlerFunc {
 }
 
 // adminMiddleware 在 authMiddleware 之后运行，校验当前登录用户是否为管理员。
-// 身份取自已验证的 user_id Cookie（即飞书 OpenID），从数据库加载用户后判断 Role。
+// 身份取自已验证的 user_id Cookie（即飞书 OpenID），从数据库加载用户后判断：
+//  1. 系统内 User.Role == "admin"，或
+//  2. 该用户的 email / open_id 命中配置的管理员白名单（ADMIN_EMAILS / ADMIN_OPEN_IDS）。
+//
+// 注意：此处的"管理员"是本系统自有的授权概念，与"飞书群管理员"无关。
 // 非管理员一律拒绝，返回 HTTP 403。
 func adminMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, _ := c.Cookie("user_id")
-		user, err := storeDB.GetUserByFeishuOpenID(userID)
-		if err != nil || user == nil || user.Role != "admin" {
-			response.FailForbidden(c, "forbidden: admin only")
-			c.Abort()
+		email, role := "", ""
+		if user, err := storeDB.GetUserByFeishuOpenID(userID); err == nil && user != nil {
+			email = user.Email
+			role = user.Role
+		}
+		if role == "admin" || cfg.IsAdmin(email, userID) {
+			c.Next()
 			return
 		}
-		c.Next()
+		response.FailForbidden(c, "无权限：仅管理员可操作。请将你的邮箱加入 ADMIN_EMAILS 或将飞书 open_id 加入 ADMIN_OPEN_IDS 后重启服务（飞书群管理员与本系统管理员无关）")
+		c.Abort()
 	}
 }
 
@@ -345,6 +353,10 @@ func authStatusHandler(c *gin.Context) {
 	}
 
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// 与 authMiddleware 一致：断言签名算法为 HMAC，拒绝其它算法（如 none/RSA）。
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
 		return []byte(cfg.JWT.Secret), nil
 	})
 	if err != nil || !token.Valid {
@@ -365,7 +377,7 @@ func authStatusHandler(c *gin.Context) {
 	for _, s := range sources {
 		sourceList = append(sourceList, gin.H{
 			"id":           s.ID,
-			"source":       s.Type,
+			"type":         s.Type,
 			"name":         s.Name,
 			"enabled":      s.Enabled,
 			"sync_status":  s.SyncStatus,
@@ -414,6 +426,7 @@ func larkCallbackHandler(c *gin.Context) {
 	user := &model.User{
 		FeishuOpenID: userTokenInfo.OpenID,
 		Name:         userTokenInfo.Name,
+		Email:        userTokenInfo.Email,
 	}
 	if err := storeDB.CreateOrUpdateUser(user); err != nil {
 		response.FailInternal(c, "保存用户失败: "+err.Error())
@@ -554,10 +567,14 @@ func browserCollectHandler(c *gin.Context) {
 	storeDB.SaveWorkRecords(records)
 
 	// 复用采集主流程的模板渲染逻辑，保证插件推送与主链路格式一致
+	weekEndStr := req.WeekStart
+	if t, err := time.Parse("2006-01-02", req.WeekStart); err == nil {
+		weekEndStr = t.AddDate(0, 0, 6).Format("2006-01-02")
+	}
 	report := &model.WeeklyReport{
 		UserID:    userID,
 		WeekStart: req.WeekStart,
-		WeekEnd:   req.WeekStart,
+		WeekEnd:   weekEndStr,
 		Status:    "draft",
 	}
 	var templateContent string
@@ -823,6 +840,10 @@ func addCommentHandler(c *gin.Context) {
 		UserID:   userID,
 		Content:  req.Content,
 	}
+	// 填充展示用的用户名，避免前端只能显示飞书 open_id
+	if u, err := storeDB.GetUserByFeishuOpenID(userID); err == nil && u != nil {
+		comment.UserName = u.Name
+	}
 	storeDB.CreateComment(comment)
 	c.JSON(200, gin.H{"code": 0, "message": "批注添加成功"})
 }
@@ -1048,6 +1069,10 @@ ul { margin: 8px 0; padding-left: 20px; }
 
 func listDataSourcesHandler(c *gin.Context) {
 	userID, _ := c.Cookie("user_id")
+	if userID == "" {
+		response.FailUnauthorized(c, "未登录")
+		return
+	}
 	dss, err := storeDB.GetDataSources(userID)
 	if err != nil {
 		response.FailInternal(c, err.Error())
@@ -1071,6 +1096,10 @@ func listDataSourcesHandler(c *gin.Context) {
 
 func createDataSourceHandler(c *gin.Context) {
 	userID, _ := c.Cookie("user_id")
+	if userID == "" {
+		response.FailUnauthorized(c, "未登录")
+		return
+	}
 	var req struct {
 		Type   string                 `json:"type"`
 		Name   string                 `json:"name"`
@@ -1167,6 +1196,22 @@ func deleteDataSourceHandler(c *gin.Context) {
 	c.JSON(200, gin.H{"code": 0, "message": "数据源删除成功"})
 }
 
+// persistSyncStatus 在一次连通性测试/采集后更新数据源的同步状态，使前端状态标签反映真实结果。
+func persistSyncStatus(ds *model.DataSource, ok bool, errMsg string) {
+	now := time.Now()
+	if ok {
+		ds.SyncStatus = "success"
+		ds.SyncError = ""
+	} else {
+		ds.SyncStatus = "failed"
+		ds.SyncError = errMsg
+	}
+	ds.LastSyncAt = &now
+	if err := storeDB.UpdateDataSource(ds); err != nil {
+		fmt.Printf("[WARN] persist datasource sync status failed: %v\n", err)
+	}
+}
+
 func testDataSourceHandler(c *gin.Context) {
 	userID, _ := c.Cookie("user_id")
 	idStr := c.Param("id")
@@ -1196,15 +1241,18 @@ func testDataSourceHandler(c *gin.Context) {
 			Author string `json:"author"`
 		}
 		if err := json.Unmarshal([]byte(ds.Config), &cfg); err != nil {
+			persistSyncStatus(ds, false, "配置解析失败: "+err.Error())
 			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false, "message": "配置解析失败: " + err.Error()})
 			return
 		}
 		source := &git.GitHubSource{Token: cfg.Token, Owner: cfg.Owner, Repo: cfg.Repo}
 		commits, err := source.FetchCommits(ctx, cfg.Author, weekStart, weekEnd)
 		if err != nil {
+			persistSyncStatus(ds, false, err.Error())
 			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false, "message": "GitHub 连接失败: " + err.Error()})
 			return
 		}
+		persistSyncStatus(ds, true, "")
 		c.JSON(200, gin.H{"code": response.CodeOK, "success": true,
 			"message": fmt.Sprintf("GitHub 连接成功，最近 7 天获取到 %d 条提交", len(commits))})
 	case "gitlab":
@@ -1215,26 +1263,32 @@ func testDataSourceHandler(c *gin.Context) {
 			Email       string `json:"email"`
 		}
 		if err := json.Unmarshal([]byte(ds.Config), &cfg); err != nil {
+			persistSyncStatus(ds, false, "配置解析失败: "+err.Error())
 			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false, "message": "配置解析失败: " + err.Error()})
 			return
 		}
 		source := &git.GitLabSource{Token: cfg.Token, ServerURL: cfg.ServerURL, ProjectPath: cfg.ProjectPath}
 		commits, err := source.FetchCommits(ctx, cfg.Email, weekStart, weekEnd)
 		if err != nil {
+			persistSyncStatus(ds, false, err.Error())
 			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false, "message": "GitLab 连接失败: " + err.Error()})
 			return
 		}
+		persistSyncStatus(ds, true, "")
 		c.JSON(200, gin.H{"code": response.CodeOK, "success": true,
 			"message": fmt.Sprintf("GitLab 连接成功，最近 7 天获取到 %d 条提交", len(commits))})
 	case "lark", "feishu":
-		// 飞书数据源依赖用户 OAuth 授权，检查是否已授权
+		// 飞书数据源依赖用户 OAuth 授权,检查是否已授权
 		if _, ok := storeDB.GetToken(userID); !ok {
+			persistSyncStatus(ds, false, "飞书未授权")
 			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false,
 				"message": "飞书未授权，请先完成飞书登录授权"})
 			return
 		}
+		persistSyncStatus(ds, true, "")
 		c.JSON(200, gin.H{"code": response.CodeOK, "success": true, "message": "飞书已授权，连接正常"})
 	default:
+		persistSyncStatus(ds, false, "不支持的类型: "+ds.Type)
 		c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false,
 			"message": "暂不支持测试该类型数据源: " + ds.Type})
 	}
@@ -1243,12 +1297,14 @@ func testDataSourceHandler(c *gin.Context) {
 // ------------------- 模板管理 -------------------
 
 func listTemplatesHandler(c *gin.Context) {
+	// 模板管理列表与周报生成下拉框共用本接口，应返回该用户可用的全部模板
+	// （global 全局/默认模板 + 该用户自己的 personal 个人模板），不返回他人的个人模板。
+	// 不能用用户的“系统角色”（User.Role 取值 admin/member，真实登录默认 member）
+	// 去过滤模板的“适用岗位角色”（Template.Role 取值 developer/tester/...），
+	// 两者是不同的取值体系：否则用户新建的（岗位角色 developer 等）模板会被
+	// 错误过滤掉，导致创建后既不出现在模板管理列表，也不出现在生成下拉框。
 	userID, _ := c.Cookie("user_id")
-	role := "member"
-	if u, err := storeDB.GetUserByFeishuOpenID(userID); err == nil && u != nil && u.Role != "" {
-		role = u.Role
-	}
-	templates, err := storeDB.GetTemplates(role)
+	templates, err := storeDB.GetTemplates("", userID)
 	if err != nil {
 		response.FailInternal(c, err.Error())
 		return
@@ -1257,6 +1313,7 @@ func listTemplatesHandler(c *gin.Context) {
 }
 
 func createTemplateHandler(c *gin.Context) {
+	userID, _ := c.Cookie("user_id")
 	var req struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -1268,6 +1325,7 @@ func createTemplateHandler(c *gin.Context) {
 		return
 	}
 	template := &model.Template{
+		UserID:      userID,
 		Name:        req.Name,
 		Description: req.Description,
 		Content:     req.Content,
@@ -1281,7 +1339,17 @@ func createTemplateHandler(c *gin.Context) {
 	c.JSON(200, gin.H{"code": 0, "message": "模板创建成功"})
 }
 
+// templateVisible 判断模板对当前用户是否可见：全局/默认模板对所有人可见，
+// 个人模板仅对其归属用户可见。
+func templateVisible(t *model.Template, userID string) bool {
+	if t.Scope == "global" || t.IsDefault {
+		return true
+	}
+	return t.UserID == userID
+}
+
 func getTemplateHandler(c *gin.Context) {
+	userID, _ := c.Cookie("user_id")
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
@@ -1289,14 +1357,15 @@ func getTemplateHandler(c *gin.Context) {
 		return
 	}
 	template, err := storeDB.GetTemplateByID(id)
-	if err != nil {
-		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, err.Error())
+	if err != nil || !templateVisible(template, userID) {
+		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, "模板不存在")
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "data": template})
 }
 
 func updateTemplateHandler(c *gin.Context) {
+	userID, _ := c.Cookie("user_id")
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
@@ -1315,7 +1384,17 @@ func updateTemplateHandler(c *gin.Context) {
 	}
 	template, err := storeDB.GetTemplateByID(id)
 	if err != nil {
-		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, err.Error())
+		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, "模板不存在")
+		return
+	}
+	// 全局/默认模板不允许修改
+	if template.Scope == "global" || template.IsDefault {
+		response.FailForbidden(c, "无权限：全局/默认模板不可修改")
+		return
+	}
+	// 仅允许修改自己的个人模板，他人模板视为不存在
+	if template.UserID != userID {
+		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, "模板不存在")
 		return
 	}
 	template.Name = req.Name
@@ -1330,10 +1409,26 @@ func updateTemplateHandler(c *gin.Context) {
 }
 
 func deleteTemplateHandler(c *gin.Context) {
+	userID, _ := c.Cookie("user_id")
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
 		response.FailParam(c, "无效的模板 ID")
+		return
+	}
+	template, err := storeDB.GetTemplateByID(id)
+	if err != nil {
+		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, "模板不存在")
+		return
+	}
+	// 全局/默认模板不允许删除
+	if template.Scope == "global" || template.IsDefault {
+		response.FailForbidden(c, "无权限：全局/默认模板不可删除")
+		return
+	}
+	// 仅允许删除自己的个人模板，他人模板视为不存在
+	if template.UserID != userID {
+		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, "模板不存在")
 		return
 	}
 	if err := storeDB.DeleteTemplate(id); err != nil {

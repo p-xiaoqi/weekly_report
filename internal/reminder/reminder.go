@@ -40,13 +40,12 @@ func (r *ReminderService) Start(spec string, botWebhook string) {
 	}
 	_, err := r.cron.AddFunc(spec, func() {
 		log.Println("[Reminder] 定时提醒任务触发")
-		// 获取当前周的开始日期（周一）
+		// 获取当前周的开始日期（周一），使用本地时区零点计算，
+		// 避免 Truncate(24h) 以 UTC 对齐造成的跨时区偏差。
 		now := time.Now()
-		weekday := int(now.Weekday())
-		if weekday == 0 {
-			weekday = 7
-		}
-		weekStart := now.AddDate(0, 0, -weekday+1).Truncate(24 * time.Hour).Format("2006-01-02")
+		offset := (int(now.Weekday()) + 6) % 7 // 周一=0, 周日=6
+		monday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -offset)
+		weekStart := monday.Format("2006-01-02")
 
 		// 检测未提交人员
 		unsubmittedUsers, err := r.findUnsubmittedUsers(weekStart)

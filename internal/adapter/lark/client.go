@@ -126,12 +126,14 @@ func (c *Client) GetUserAccessToken(ctx context.Context, code string) (*UserToke
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Data struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			ExpiresIn    int    `json:"expires_in"`
-			UserID       string `json:"user_id"`
-			OpenID       string `json:"open_id"`
-			Name         string `json:"name"`
+			AccessToken     string `json:"access_token"`
+			RefreshToken    string `json:"refresh_token"`
+			ExpiresIn       int    `json:"expires_in"`
+			UserID          string `json:"user_id"`
+			OpenID          string `json:"open_id"`
+			Name            string `json:"name"`
+			Email           string `json:"email"`
+			EnterpriseEmail string `json:"enterprise_email"`
 		} `json:"data"`
 	}
 
@@ -143,6 +145,11 @@ func (c *Client) GetUserAccessToken(ctx context.Context, code string) (*UserToke
 		return nil, fmt.Errorf("get user token failed: code=%d, msg=%s", result.Code, result.Msg)
 	}
 
+	email := result.Data.EnterpriseEmail
+	if email == "" {
+		email = result.Data.Email
+	}
+
 	return &UserTokenInfo{
 		AccessToken:  result.Data.AccessToken,
 		RefreshToken: result.Data.RefreshToken,
@@ -150,6 +157,7 @@ func (c *Client) GetUserAccessToken(ctx context.Context, code string) (*UserToke
 		UserID:       result.Data.UserID,
 		OpenID:       result.Data.OpenID,
 		Name:         result.Data.Name,
+		Email:        email,
 	}, nil
 }
 
@@ -291,6 +299,7 @@ type UserTokenInfo struct {
 	UserID       string
 	OpenID       string
 	Name         string
+	Email        string
 }
 
 type Task struct {

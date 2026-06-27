@@ -25,3 +25,10 @@ reminder:
   cron: "0 0 10 * * 5"
   bot_webhook: "${FEISHU_BOT_WEBHOOK}"
   bot_secret: ""
+
+# 管理员白名单（用于 /api/v1/admin/* 接口，如"测试提醒"）。
+# 与"飞书群管理员"无关：这是本系统自有的管理员授权名单。
+# 逗号分隔，留空表示无人通过白名单授权（除非用户 Role 已是 admin）。
+admin:
+  emails: "${ADMIN_EMAILS}"     # 例如 "alice@example.com,bob@example.com"
+  open_ids: "${ADMIN_OPEN_IDS}" # 例如 "ou_xxx,ou_yyy"（飞书 open_id）

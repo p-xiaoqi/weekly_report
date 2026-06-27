@@ -548,14 +548,73 @@ func TestCreateTemplate(t *testing.T) {
 	}
 }
 
+// TC-TMPL-004: 创建后立即出现在列表（回归：真实登录用户系统角色为 member，
+// 新建模板的岗位角色为 developer，列表不应因系统角色过滤掉新模板）
+func TestCreateThenListTemplate(t *testing.T) {
+	r, s := setupTestServer(t)
+
+	// 模拟真实飞书登录：仅设置 Name，Role 走默认值 "member"
+	s.CreateOrUpdateUser(&model.User{FeishuOpenID: "user_test_001", Name: "Tester"})
+
+	// 1) 创建一个岗位角色为 developer 的个人模板
+	payload := map[string]interface{}{
+		"name":        "我的开发周报模板",
+		"description": "round-trip",
+		"content":     "## 周报\n{{range .Tasks}}- {{.Title}}\n{{end}}",
+		"role":        "developer",
+	}
+	body, _ := json.Marshal(payload)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("create expected status 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// 2) 列表应包含刚创建的模板
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/api/v1/templates", nil)
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("list expected status 200, got %d", w.Code)
+	}
+	var resp struct {
+		Code int              `json:"code"`
+		Data []model.Template `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal list resp: %v", err)
+	}
+	found := false
+	for _, tmpl := range resp.Data {
+		if tmpl.Name == "我的开发周报模板" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("newly created template should appear in list, got %d templates: %s", len(resp.Data), w.Body.String())
+	}
+	_ = s
+}
+
 // TC-TMPL-003: 删除模板
 func TestDeleteTemplate(t *testing.T) {
 	r, s := setupTestServer(t)
 
 	tmpl := &model.Template{
+		UserID:  "user_test_001",
 		Name:    "测试模板",
 		Content: "## 测试\n",
 		Role:    "developer",
+		Scope:   "personal",
 	}
 	s.SaveTemplate(tmpl)
 
@@ -573,6 +632,56 @@ func TestDeleteTemplate(t *testing.T) {
 	_, err := s.GetTemplateByID(tmpl.ID)
 	if err == nil {
 		t.Errorf("expected template to be deleted")
+	}
+}
+
+// TC-TMPL-005: 用户 B 不能删除用户 A 的个人模板（应被拒绝：403 或 404）
+func TestDeleteOtherUsersTemplateForbidden(t *testing.T) {
+	r, s := setupTestServer(t)
+
+	// 用户 A 拥有的个人模板
+	tmpl := &model.Template{
+		UserID:  "user_A",
+		Name:    "A 的私有模板",
+		Content: "## A\n",
+		Role:    "developer",
+		Scope:   "personal",
+	}
+	s.SaveTemplate(tmpl)
+
+	// 用户 B 尝试删除
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("DELETE", fmt.Sprintf("/api/v1/templates/%d", tmpl.ID), nil)
+	for _, ck := range authCookies("user_B") {
+		req.AddCookie(ck)
+	}
+	r.ServeHTTP(w, req)
+
+	if w.Code != 403 && w.Code != 404 {
+		t.Errorf("expected status 403 or 404, got %d", w.Code)
+	}
+
+	// 模板仍应存在
+	if _, err := s.GetTemplateByID(tmpl.ID); err != nil {
+		t.Errorf("expected A's template to still exist, got err: %v", err)
+	}
+
+	// 用户 B 的模板列表中不应出现 A 的个人模板
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/api/v1/templates", nil)
+	for _, ck := range authCookies("user_B") {
+		req.AddCookie(ck)
+	}
+	r.ServeHTTP(w, req)
+	var resp struct {
+		Code int              `json:"code"`
+		Data []model.Template `json:"data"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	for _, tm := range resp.Data {
+		if tm.Name == "A 的私有模板" {
+			t.Errorf("user B should not see user A's personal template in list")
+		}
 	}
 }
 
@@ -709,6 +818,20 @@ func TestStoreUserMapping(t *testing.T) {
 	selfID := s.GetRealUserID("unknown_browser")
 	if selfID != "unknown_browser" {
 		t.Errorf("expected unknown_browser, got %s", selfID)
+	}
+}
+
+// TC-COLLECT-COMMIT-001: git commit 记录应被渲染进周报正文（回归 Problem 1）
+func TestCommitRecordsRendered(t *testing.T) {
+	report := &model.WeeklyReport{WeekStart: "2026-06-22", WeekEnd: "2026-06-28"}
+	records := []model.WorkRecord{
+		{SourceType: "github", RecordType: model.TypeCommit, Title: "feat: 实现登录功能", ProjectName: "org/repo", OccurredAt: time.Now()},
+		{SourceType: "gitlab", RecordType: model.TypeCommit, Title: "fix: 修复采集 bug", ProjectName: "grp/proj", OccurredAt: time.Now()},
+	}
+	// 默认模板（空 templateContent 走 fallback）与具名模板都应包含提交标题
+	md := collector.RenderReport(report, records, nil, "")
+	if !strings.Contains(md, "feat: 实现登录功能") || !strings.Contains(md, "fix: 修复采集 bug") {
+		t.Errorf("expected commit titles to appear in rendered markdown, got:\n%s", md)
 	}
 }
 
