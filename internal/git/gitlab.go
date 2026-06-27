@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -55,7 +56,7 @@ func (g *GitLabSource) FetchCommits(ctx context.Context, authorEmail string, wee
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("GitLab API 返回状态码: %d", resp.StatusCode)
+			return nil, gitlabError(resp.StatusCode, body, g.ProjectPath)
 		}
 
 		var commits []GitLabCommit
@@ -90,9 +91,40 @@ func (g *GitLabSource) TestConnection(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("GitLab API 返回状态码: %d", resp.StatusCode)
+		return gitlabError(resp.StatusCode, body, g.ProjectPath)
 	}
 	return nil
+}
+
+// gitlabError 把 GitLab API 的非 200 状态码翻译成可操作的中文提示，
+// 并附带 GitLab 返回体里的 message/error，便于用户快速定位（尤其是高频的 401/403/404）。
+func gitlabError(status int, body []byte, projectPath string) error {
+	var detail struct {
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &detail)
+	apiMsg := strings.TrimSpace(detail.Message)
+	if apiMsg == "" {
+		apiMsg = strings.TrimSpace(detail.Error)
+	}
+
+	var hint string
+	switch status {
+	case http.StatusUnauthorized: // 401
+		hint = "鉴权失败：PRIVATE-TOKEN 无效/过期/填写有误（确认是有效的 GitLab Access Token，且未多带空格或引号）"
+	case http.StatusForbidden: // 403
+		hint = "被拒绝：token 缺少访问该项目的权限（至少需要 read_api / read_repository scope）"
+	case http.StatusNotFound: // 404
+		hint = fmt.Sprintf("项目不存在或无权访问：请确认 project_path（当前 %s）与 server_url 正确；私有项目 token 需有读权限", projectPath)
+	default:
+		hint = "请求未成功"
+	}
+	if apiMsg != "" {
+		return fmt.Errorf("GitLab API %d - %s（GitLab 返回：%s）", status, hint, apiMsg)
+	}
+	return fmt.Errorf("GitLab API %d - %s", status, hint)
 }

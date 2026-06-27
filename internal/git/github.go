@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -56,7 +57,7 @@ func (g *GitHubSource) FetchCommits(ctx context.Context, author string, weekStar
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("GitHub API 返回状态码: %d", resp.StatusCode)
+			return nil, githubError(resp.StatusCode, body, g.Owner, g.Repo)
 		}
 
 		var commits []GitHubCommit
@@ -88,9 +89,38 @@ func (g *GitHubSource) TestConnection(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("GitHub API 返回状态码: %d", resp.StatusCode)
+		return githubError(resp.StatusCode, body, g.Owner, g.Repo)
 	}
 	return nil
+}
+
+// githubError 把 GitHub API 的非 200 状态码翻译成可操作的中文提示，
+// 并附带 GitHub 返回体里的 message，便于用户快速定位（尤其是高频的 401/403/404）。
+func githubError(status int, body []byte, owner, repo string) error {
+	var detail struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(body, &detail)
+	apiMsg := strings.TrimSpace(detail.Message)
+
+	var hint string
+	switch status {
+	case http.StatusUnauthorized: // 401
+		hint = "鉴权失败：token 无效/过期/填写有误（检查是否多了空格或引号、是否已过期、是否为正确的 GitHub PAT）"
+	case http.StatusForbidden: // 403
+		hint = "被拒绝：通常是触发了 API 限流（未带 token 时每小时仅 60 次），或 token 缺少访问该仓库的权限"
+	case http.StatusNotFound: // 404
+		hint = fmt.Sprintf("仓库不存在或无权访问：请确认 owner/repo（当前 %s/%s）正确；若为私有仓库，token 需具备 repo 读权限", owner, repo)
+	case http.StatusUnprocessableEntity: // 422
+		hint = "参数有误：常见于 author 过滤值不是有效的 GitHub 用户"
+	default:
+		hint = "请求未成功"
+	}
+	if apiMsg != "" {
+		return fmt.Errorf("GitHub API %d - %s（GitHub 返回：%s）", status, hint, apiMsg)
+	}
+	return fmt.Errorf("GitHub API %d - %s", status, hint)
 }
