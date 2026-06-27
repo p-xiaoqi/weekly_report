@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -97,8 +99,9 @@ type ChatInfo struct {
 }
 
 // ListUserChats 拉取授权用户所在的群列表（chat_id + 名称）。
+// query 非空时调用搜索接口（按群名模糊匹配），便于群很多时定位；为空则列全部。
 // 传入 user_access_token 时返回该用户加入的群；为空则回退 tenant_access_token（返回机器人所在群）。
-func (c *Client) ListUserChats(ctx context.Context, userAccessToken string) ([]ChatInfo, error) {
+func (c *Client) ListUserChats(ctx context.Context, userAccessToken, query string) ([]ChatInfo, error) {
 	token := userAccessToken
 	if token == "" {
 		var err error
@@ -108,14 +111,24 @@ func (c *Client) ListUserChats(ctx context.Context, userAccessToken string) ([]C
 		}
 	}
 
+	base := "https://open.feishu.cn/open-apis/im/v1/chats"
+	if strings.TrimSpace(query) != "" {
+		base = "https://open.feishu.cn/open-apis/im/v1/chats/search?query=" + url.QueryEscape(query)
+	}
+
 	var all []ChatInfo
 	pageToken := ""
 	for {
-		url := "https://open.feishu.cn/open-apis/im/v1/chats?page_size=100"
-		if pageToken != "" {
-			url += "&page_token=" + pageToken
+		u := base
+		sep := "?"
+		if strings.Contains(u, "?") {
+			sep = "&"
 		}
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		u += sep + "page_size=100"
+		if pageToken != "" {
+			u += "&page_token=" + pageToken
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 		if err != nil {
 			return nil, err
 		}

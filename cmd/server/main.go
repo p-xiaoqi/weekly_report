@@ -1546,7 +1546,7 @@ func listChatsHandler(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	chats, err := larkClient.ListUserChats(ctx, token)
+	chats, err := larkClient.ListUserChats(ctx, token, c.Query("query"))
 	if err != nil {
 		response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, err.Error())
 		return

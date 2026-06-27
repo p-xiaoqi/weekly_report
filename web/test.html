@@ -203,6 +203,10 @@
                 <button class="btn btn-warning" id="btn-remind" onclick="testRemind()">🔔 测试提醒</button>
                 <button class="btn" id="btn-chats" onclick="loadMyChats()">💬 获取我的群聊</button>
             </div>
+            <div style="margin-top:8px;display:flex;gap:6px;align-items:center;">
+                <input type="text" id="chat-search" placeholder="搜索群聊名称（群多时用）" style="flex:1;padding:6px 8px;" onkeydown="if(event.key==='Enter')searchMyChats()">
+                <button class="btn" onclick="searchMyChats()">🔍 搜索</button>
+            </div>
             <div id="chat-list" style="margin-top:10px;"></div>
         </div>
 
@@ -769,12 +773,17 @@
 
         // ---------- 获取我的群聊 ----------
         let myChats = [];
-        async function loadMyChats() {
+        function searchMyChats() {
+            const q = (document.getElementById('chat-search').value || '').trim();
+            loadMyChats(q);
+        }
+        async function loadMyChats(query) {
             if (!requireLogin()) return;
             const box = document.getElementById('chat-list');
             box.innerHTML = '<span style="color:#888">加载中…</span>';
             try {
-                const res = await fetch('/api/v1/feishu/chats', { credentials: 'include' });
+                const url = '/api/v1/feishu/chats' + (query ? ('?query=' + encodeURIComponent(query)) : '');
+                const res = await fetch(url, { credentials: 'include' });
                 const data = await res.json();
                 if (data.code !== 0) {
                     box.innerHTML = '<span style="color:#c0392b">' + escapeHtml(data.error || '获取失败') + '</span>';
@@ -783,7 +792,7 @@
                 }
                 myChats = data.data || [];
                 if (myChats.length === 0) {
-                    box.innerHTML = '<span style="color:#888">没有找到群聊（机器人/你需要先加入群，并确认应用已开通 im:chat 权限）</span>';
+                    box.innerHTML = '<span style="color:#888">' + (query ? '没有匹配"' + escapeHtml(query) + '"的群聊' : '没有找到群聊（机器人/你需要先加入群，并确认应用已开通 im:chat 权限）') + '</span>';
                     return;
                 }
                 let html = '<div style="font-size:12px;color:#666;margin-bottom:6px;">勾选要通知的群（可多选），点下方按钮发送测试，结果会逐群显示成功/失败</div>';
