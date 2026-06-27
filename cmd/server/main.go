@@ -162,7 +162,12 @@ func adminMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		response.FailForbidden(c, "无权限：仅管理员可操作。请将你的邮箱加入 ADMIN_EMAILS 或将飞书 open_id 加入 ADMIN_OPEN_IDS 后重启服务（飞书群管理员与本系统管理员无关）")
+		// 把"当前检测到的身份"回显出来，方便用户比对：通常是配置的 open_id 与
+		// 实际登录用户的 open_id 不一致，或 .env 未被加载 / 服务未重启。
+		response.FailForbidden(c, fmt.Sprintf(
+			"无权限：仅管理员可操作。当前登录 open_id=%q，email=%q；请确认该 open_id 已加入 ADMIN_OPEN_IDS（或 email 加入 ADMIN_EMAILS）且服务已重启。"+
+				"已加载的白名单：ADMIN_OPEN_IDS=%q，ADMIN_EMAILS=%q（若此处为空说明 .env 未被读取）。飞书群管理员与本系统管理员无关。",
+			userID, email, cfg.Admin.OpenIDs, cfg.Admin.Emails))
 		c.Abort()
 	}
 }
