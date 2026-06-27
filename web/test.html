@@ -766,6 +766,21 @@
         }
 
         // ---------- 数据源 ----------
+        // 把已配置且启用的数据源类型自动勾选进“周报生成”的数据源多选框。
+        // 飞书类型(lark/feishu)统一映射到 lark 选项。
+        function syncGenerateSourceSelection(items) {
+            const sel = document.getElementById('data-sources');
+            if (!sel) return;
+            const enabledTypes = new Set();
+            (items || []).forEach(ds => {
+                if (ds.enabled === false) return;
+                const t = (ds.type === 'feishu') ? 'lark' : ds.type;
+                enabledTypes.add(t);
+            });
+            // 若没有任何已配置数据源，保持飞书默认选中；否则按已配置类型勾选。
+            if (enabledTypes.size === 0) return;
+            Array.from(sel.options).forEach(o => { o.selected = enabledTypes.has(o.value); });
+        }
         // 各类型数据源的配置 JSON 模板与字段说明，用于在“数据源配置”弹窗中
         // 根据所选类型动态给出正确的格式提示，避免用户乱填或类型选错。
         const DS_CONFIG_SCHEMA = {
@@ -835,6 +850,10 @@
                         </div>
                     `).join('');
                     addLog(`数据源: ${items.length} 个`, 'info');
+                    // 关键：把已配置且启用的数据源类型自动勾选到“周报生成”的数据源多选框，
+                    // 否则该多选框默认只选中“飞书任务”，用户配了 github 也不会被采集，
+                    // 导致“git 记录没进周报”的现象。
+                    syncGenerateSourceSelection(items);
                 } else {
                     list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div>暂无数据源</div>';
                 }
