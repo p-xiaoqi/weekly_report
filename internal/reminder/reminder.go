@@ -1,8 +1,11 @@
 package reminder
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -141,8 +144,17 @@ func (r *ReminderService) SendTestMessage(webhook, secret, content string) error
 
 // sendBotMessage 发送飞书群机器人消息
 func (r *ReminderService) sendBotMessage(webhook, content string) error {
-	// 简单实现：直接发送 HTTP POST 请求到 webhook
-	// 实际生产环境需要处理签名（如果配置了 secret）
-	log.Printf("[Reminder] 发送消息到 %s: %s", webhook, content)
+	payload := map[string]interface{}{"msg_type": "text", "content": map[string]string{"text": content}}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", webhook, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 	return nil
 }

@@ -22,6 +22,6 @@ log:
 
 reminder:
   enabled: true
-  cron: "0 10 * * 5"
-  bot_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/e61c79e9-0f49-4948-a0bc-577ce7984f4e"
+  cron: "0 0 10 * * 5"
+  bot_webhook: "${FEISHU_BOT_WEBHOOK}"
   bot_secret: ""

@@ -1,8 +1,13 @@
 package store
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -73,6 +78,29 @@ func (s *Store) GetReport(userID, weekStart string) (*model.WeeklyReport, bool) 
 	return &report, true
 }
 
+// UpdateReportMarkdown 更新指定用户某周周报的草稿正文及结构化字段，
+// 仅更新传入的非空字段，并返回更新后的周报。报告不存在时返回 (nil,false)。
+func (s *Store) UpdateReportMarkdown(userID, weekStart, markdown, content, status string) (*model.WeeklyReport, bool) {
+	var report model.WeeklyReport
+	if err := s.db.Where("user_id = ? AND week_start = ?", userID, weekStart).First(&report).Error; err != nil {
+		return nil, false
+	}
+	if markdown != "" {
+		report.Markdown = markdown
+	}
+	if content != "" {
+		report.Content = content
+	}
+	if status != "" {
+		report.Status = status
+	}
+	if err := s.db.Save(&report).Error; err != nil {
+		log.Printf("[ERROR] UpdateReportMarkdown failed: %v", err)
+		return nil, false
+	}
+	return &report, true
+}
+
 func (s *Store) ListReports(userID string) []*model.WeeklyReport {
 	var reports []model.WeeklyReport
 	s.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&reports)
@@ -85,20 +113,73 @@ func (s *Store) ListReports(userID string) []*model.WeeklyReport {
 
 // --- Token 相关 ---
 
-func encryptToken(token string) string {
-	return base64.StdEncoding.EncodeToString([]byte(token))
+// tokenKey 为 AES-256-GCM 加解密密钥，必须通过 SetTokenKey 由配置（JWT Secret）派生后才可使用。
+// 不再提供任何硬编码默认值，未设置时加解密直接返回错误。
+var (
+	tokenKey    [32]byte
+	tokenKeySet bool
+)
+
+// SetTokenKey 设置 Token 加密密钥（应在启动时通过 JWT Secret 派生）。
+// 入参经 sha256 归一化为固定 32 字节，因此任意长度的 Secret 均可使用。
+func SetTokenKey(s string) {
+	tokenKey = sha256.Sum256([]byte(s))
+	tokenKeySet = true
 }
 
-func decryptToken(encrypted string) (string, error) {
-	data, err := base64.StdEncoding.DecodeString(encrypted)
+func encryptToken(plain string) (string, error) {
+	if !tokenKeySet {
+		return "", fmt.Errorf("token encryption key not set: call store.SetTokenKey first")
+	}
+	block, err := aes.NewCipher(tokenKey[:])
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plain), nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+func decryptToken(enc string) (string, error) {
+	if !tokenKeySet {
+		return "", fmt.Errorf("token encryption key not set: call store.SetTokenKey first")
+	}
+	data, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(tokenKey[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(data) < gcm.NonceSize() {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
 }
 
 func (s *Store) SaveToken(userID, token string, expiresIn time.Duration) {
-	encrypted := encryptToken(token)
+	encrypted, err := encryptToken(token)
+	if err != nil {
+		log.Printf("[ERROR] SaveToken encrypt failed: %v", err)
+		return
+	}
 	expiresAt := time.Now().Add(expiresIn)
 
 	var ft model.FeishuToken
@@ -405,16 +486,16 @@ func (s *Store) SaveCronJob(job *model.CronJob) error {
 
 func (s *Store) GetWeeklyStats(userID string, weeks int) ([]map[string]interface{}, error) {
 	var results []map[string]interface{}
-	rows, err := s.db.Raw(`
-		SELECT week_start,
-			SUM(CASE WHEN record_type = 'commit' THEN 1 ELSE 0 END) as commit_count,
-			SUM(CASE WHEN record_type = 'task' THEN 1 ELSE 0 END) as task_count,
-			SUM(CASE WHEN record_type = 'meeting' THEN 1 ELSE 0 END) as meeting_count
+	sql := fmt.Sprintf(`SELECT week_start,
+		SUM(CASE WHEN record_type = 'commit' THEN 1 ELSE 0 END) as commit_count,
+		SUM(CASE WHEN record_type = 'task' THEN 1 ELSE 0 END) as task_count,
+		SUM(CASE WHEN record_type = 'meeting' THEN 1 ELSE 0 END) as meeting_count
 		FROM work_records
-		WHERE user_id = ? AND occurred_at >= date('now', '-? days')
+		WHERE user_id = ?
 		GROUP BY week_start
 		ORDER BY week_start DESC
-		LIMIT ?`, userID, weeks*7, weeks).Rows()
+		LIMIT %d`, weeks)
+	rows, err := s.db.Raw(sql, userID).Rows()
 	if err != nil {
 		return nil, err
 	}
@@ -526,8 +607,9 @@ func (s *Store) InitDefaultTemplates() error {
 {{end}}
 ## 遇到的问题
 
-- 待补充
-
+{{if .HasProblems}}{{range .Problems}}- {{.}}
+{{end}}{{else}}- （本周暂无自动识别到的问题，请补充）
+{{end}}
 ## 下周计划
 
 {{if .HasNextWeek}}{{range .NextWeekEvents}}- [ ] {{.Title}} ({{.OccurredDate}})
@@ -563,8 +645,9 @@ func (s *Store) InitDefaultTemplates() error {
 {{end}}
 ## 遇到的问题
 
-- 待补充
-
+{{if .HasProblems}}{{range .Problems}}- {{.}}
+{{end}}{{else}}- （本周暂无自动识别到的问题，请补充）
+{{end}}
 ## 下周计划
 
 - 待补充`,

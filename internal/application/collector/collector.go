@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"text/template"
 	"time"
 
@@ -14,6 +15,62 @@ import (
 	"weekly-report-system/internal/model"
 	"weekly-report-system/internal/store"
 )
+
+// problemKeywords 用于从工作记录中轻量启发式识别"问题/阻塞"候选项。
+var problemKeywords = []string{
+	"阻塞", "blocked", "block", "bug", "失败", "fail", "error",
+	"问题", "risk", "风险", "delay", "延期", "卡住", "异常",
+}
+
+// extractProblems 扫描工作记录（提交信息、任务标题/描述），命中关键词的条目
+// 作为候选问题返回，并按标题去重。
+func extractProblems(records []model.WorkRecord) []string {
+	var problems []string
+	seen := make(map[string]bool)
+	for _, rec := range records {
+		if rec.IsHidden {
+			continue
+		}
+		lower := strings.ToLower(rec.Title + " " + rec.Description)
+		for _, kw := range problemKeywords {
+			if strings.Contains(lower, strings.ToLower(kw)) {
+				item := strings.TrimSpace(rec.Title)
+				if item == "" {
+					item = strings.TrimSpace(rec.Description)
+				}
+				if item != "" && !seen[item] {
+					seen[item] = true
+					problems = append(problems, item)
+				}
+				break
+			}
+		}
+	}
+	return problems
+}
+
+// mergeRecords 将 extra 中尚未出现在 base 的记录追加进来，避免重复。
+// 去重键优先使用 SourceType+ExternalID，缺失时回退到 SourceType+RecordType+Title。
+func mergeRecords(base, extra []model.WorkRecord) []model.WorkRecord {
+	key := func(r model.WorkRecord) string {
+		if r.ExternalID != "" {
+			return r.SourceType + "|" + r.ExternalID
+		}
+		return r.SourceType + "|" + string(r.RecordType) + "|" + r.Title
+	}
+	seen := make(map[string]bool, len(base))
+	for _, r := range base {
+		seen[key(r)] = true
+	}
+	for _, r := range extra {
+		k := key(r)
+		if !seen[k] {
+			seen[k] = true
+			base = append(base, r)
+		}
+	}
+	return base
+}
 
 type Collector struct {
 	larkAdapter *lark.Adapter
@@ -27,13 +84,14 @@ func New(larkAdapter *lark.Adapter, store *store.Store) *Collector {
 	}
 }
 
-func (c *Collector) Collect(ctx context.Context, req model.CollectionRequest) (*model.WeeklyReport, error) {
+func (c *Collector) Collect(ctx context.Context, req model.CollectionRequest) (*model.WeeklyReport, []string, error) {
 	weekEnd := req.WeekStart.AddDate(0, 0, 6).Add(23*time.Hour + 59*time.Minute + 59*time.Second)
 	weekStartStr := req.WeekStart.Format("2006-01-02")
 	weekEndStr := weekEnd.Format("2006-01-02")
 
 	var allRecords []model.WorkRecord
 	var nextWeekEvents []model.WorkRecord
+	var warnings []string
 
 	// 根据数据源列表采集
 	sources := req.DataSources
@@ -46,7 +104,7 @@ func (c *Collector) Collect(ctx context.Context, req model.CollectionRequest) (*
 		case "lark":
 			token, ok := c.store.GetToken(req.UserID)
 			if !ok {
-				return nil, fmt.Errorf("user not authorized with Lark, please visit /api/v1/auth/lark/login first")
+				return nil, warnings, fmt.Errorf("user not authorized with Lark, please visit /api/v1/auth/lark/login first")
 			}
 			fetchReq := lark.FetchRequest{
 				UserID:        req.UserID,
@@ -56,21 +114,17 @@ func (c *Collector) Collect(ctx context.Context, req model.CollectionRequest) (*
 			}
 			records, nwe, err := c.larkAdapter.Fetch(ctx, fetchReq)
 			if err != nil {
-				return nil, fmt.Errorf("fetch from lark failed: %w", err)
+				return nil, warnings, fmt.Errorf("fetch from lark failed: %w", err)
 			}
 			allRecords = append(allRecords, records...)
 			nextWeekEvents = append(nextWeekEvents, nwe...)
 		case "gitlab":
-			records, err := c.fetchGitLab(ctx, req.UserID, req.WeekStart, weekEnd)
-			if err != nil {
-				return nil, fmt.Errorf("fetch from gitlab failed: %w", err)
-			}
+			records, ws := c.fetchGitLab(ctx, req.UserID, req.WeekStart, weekEnd)
+			warnings = append(warnings, ws...)
 			allRecords = append(allRecords, records...)
 		case "github":
-			records, err := c.fetchGitHub(ctx, req.UserID, req.WeekStart, weekEnd)
-			if err != nil {
-				return nil, fmt.Errorf("fetch from github failed: %w", err)
-			}
+			records, ws := c.fetchGitHub(ctx, req.UserID, req.WeekStart, weekEnd)
+			warnings = append(warnings, ws...)
 			allRecords = append(allRecords, records...)
 		}
 	}
@@ -88,10 +142,16 @@ func (c *Collector) Collect(ctx context.Context, req model.CollectionRequest) (*
 
 	// 保存工作记录到数据库
 	if err := c.store.SaveWorkRecords(allRecords); err != nil {
-		return nil, fmt.Errorf("save work records failed: %w", err)
+		return nil, warnings, fmt.Errorf("save work records failed: %w", err)
 	}
 	if err := c.store.SaveWorkRecords(nextWeekEvents); err != nil {
-		return nil, fmt.Errorf("save next week events failed: %w", err)
+		return nil, warnings, fmt.Errorf("save next week events failed: %w", err)
+	}
+
+	// 合并数据库中已存储的手动录入 / 浏览器插件推送记录，使其同样出现在生成的草稿中。
+	// GetWorkRecords 会返回当周全部非隐藏记录（含刚保存的 allRecords），由 mergeRecords 去重。
+	if stored, err := c.store.GetWorkRecords(req.UserID, weekStartStr); err == nil {
+		allRecords = mergeRecords(allRecords, stored)
 	}
 
 	report := &model.WeeklyReport{
@@ -122,93 +182,179 @@ func (c *Collector) Collect(ctx context.Context, req model.CollectionRequest) (*
 	report.TemplateID = templateID
 
 	report.Markdown = c.RenderMarkdown(report, allRecords, nextWeekEvents, templateContent)
+
 	c.store.SaveReport(report)
 
-	return report, nil
+	return report, warnings, nil
+
 }
 
-func (c *Collector) fetchGitLab(ctx context.Context, userID string, weekStart, weekEnd time.Time) ([]model.WorkRecord, error) {
+func (c *Collector) fetchGitLab(ctx context.Context, userID string, weekStart, weekEnd time.Time) ([]model.WorkRecord, []string) {
+
 	dss, err := c.store.GetDataSources(userID)
+
 	if err != nil {
-		return nil, err
+
+		return nil, []string{fmt.Sprintf("gitlab: 读取数据源配置失败: %v", err)}
+
 	}
+
 	var records []model.WorkRecord
+
+	var warnings []string
+
 	for _, ds := range dss {
+
 		if ds.Type != "gitlab" || !ds.Enabled {
+
 			continue
+
 		}
+
 		var cfg struct {
-			Token       string `json:"token"`
-			ServerURL   string `json:"server_url"`
+			Token string `json:"token"`
+
+			ServerURL string `json:"server_url"`
+
 			ProjectPath string `json:"project_path"`
-			Email       string `json:"email"`
+
+			Email string `json:"email"`
 		}
+
 		if err := json.Unmarshal([]byte(ds.Config), &cfg); err != nil {
+
+			warnings = append(warnings, fmt.Sprintf("gitlab 数据源 %q 配置解析失败: %v", ds.Name, err))
+
 			continue
+
 		}
+
 		source := &git.GitLabSource{
-			Token:       cfg.Token,
-			ServerURL:   cfg.ServerURL,
+
+			Token: cfg.Token,
+
+			ServerURL: cfg.ServerURL,
+
 			ProjectPath: cfg.ProjectPath,
 		}
+
 		commits, err := source.FetchCommits(ctx, cfg.Email, weekStart, weekEnd)
+
 		if err != nil {
+
+			warnings = append(warnings, fmt.Sprintf("gitlab fetch failed (数据源 %q): %v", ds.Name, err))
+
 			continue
+
 		}
+
 		for _, commit := range commits {
+
 			records = append(records, model.WorkRecord{
+
 				SourceType: "gitlab",
-				ExternalID:  commit.ID,
-				RecordType:  model.TypeCommit,
-				Title:       commit.Message,
+
+				ExternalID: commit.ID,
+
+				RecordType: model.TypeCommit,
+
+				Title: commit.Message,
+
 				ProjectName: cfg.ProjectPath,
-				OccurredAt:  parseGitTime(commit.CreatedAt),
+
+				OccurredAt: parseGitTime(commit.CreatedAt),
 			})
+
 		}
+
 	}
-	return records, nil
+
+	return records, warnings
+
 }
 
-func (c *Collector) fetchGitHub(ctx context.Context, userID string, weekStart, weekEnd time.Time) ([]model.WorkRecord, error) {
+func (c *Collector) fetchGitHub(ctx context.Context, userID string, weekStart, weekEnd time.Time) ([]model.WorkRecord, []string) {
+
 	dss, err := c.store.GetDataSources(userID)
+
 	if err != nil {
-		return nil, err
+
+		return nil, []string{fmt.Sprintf("github: 读取数据源配置失败: %v", err)}
+
 	}
+
 	var records []model.WorkRecord
+
+	var warnings []string
+
 	for _, ds := range dss {
+
 		if ds.Type != "github" || !ds.Enabled {
+
 			continue
+
 		}
+
 		var cfg struct {
-			Token  string `json:"token"`
-			Owner  string `json:"owner"`
-			Repo   string `json:"repo"`
+			Token string `json:"token"`
+
+			Owner string `json:"owner"`
+
+			Repo string `json:"repo"`
+
 			Author string `json:"author"`
 		}
+
 		if err := json.Unmarshal([]byte(ds.Config), &cfg); err != nil {
+
+			warnings = append(warnings, fmt.Sprintf("github 数据源 %q 配置解析失败: %v", ds.Name, err))
+
 			continue
+
 		}
+
 		source := &git.GitHubSource{
+
 			Token: cfg.Token,
+
 			Owner: cfg.Owner,
-			Repo:  cfg.Repo,
+
+			Repo: cfg.Repo,
 		}
+
 		commits, err := source.FetchCommits(ctx, cfg.Author, weekStart, weekEnd)
+
 		if err != nil {
+
+			warnings = append(warnings, fmt.Sprintf("github fetch failed (数据源 %q): %v", ds.Name, err))
+
 			continue
+
 		}
+
 		for _, commit := range commits {
+
 			records = append(records, model.WorkRecord{
+
 				SourceType: "github",
-				ExternalID:  commit.SHA,
-				RecordType:  model.TypeCommit,
-				Title:       commit.Commit.Message,
+
+				ExternalID: commit.SHA,
+
+				RecordType: model.TypeCommit,
+
+				Title: commit.Commit.Message,
+
 				ProjectName: fmt.Sprintf("%s/%s", cfg.Owner, cfg.Repo),
-				OccurredAt:  parseGitTime(commit.Commit.Author.Date),
+
+				OccurredAt: parseGitTime(commit.Commit.Author.Date),
 			})
+
 		}
+
 	}
-	return records, nil
+
+	return records, warnings
+
 }
 
 func parseGitTime(s string) time.Time {
@@ -219,8 +365,14 @@ func parseGitTime(s string) time.Time {
 }
 
 func (c *Collector) RenderMarkdown(r *model.WeeklyReport, records []model.WorkRecord, nextWeekEvents []model.WorkRecord, templateContent string) string {
+	return RenderReport(r, records, nextWeekEvents, templateContent)
+}
+
+// RenderReport 是周报 Markdown 渲染的统一入口，供采集主流程（Collect）
+// 和浏览器插件推送路径共同复用，确保两条链路产出格式完全一致。
+func RenderReport(r *model.WeeklyReport, records []model.WorkRecord, nextWeekEvents []model.WorkRecord, templateContent string) string {
 	if templateContent == "" {
-		return c.renderMarkdownFallback(r, records, nextWeekEvents)
+		return renderMarkdownFallback(r, records, nextWeekEvents)
 	}
 
 	data := buildTemplateData(r, records, nextWeekEvents)
@@ -228,19 +380,19 @@ func (c *Collector) RenderMarkdown(r *model.WeeklyReport, records []model.WorkRe
 	tmpl, err := template.New("report").Parse(templateContent)
 	if err != nil {
 		log.Printf("[WARN] template parse failed: %v, falling back to default", err)
-		return c.renderMarkdownFallback(r, records, nextWeekEvents)
+		return renderMarkdownFallback(r, records, nextWeekEvents)
 	}
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		log.Printf("[WARN] template execute failed: %v, falling back to default", err)
-		return c.renderMarkdownFallback(r, records, nextWeekEvents)
+		return renderMarkdownFallback(r, records, nextWeekEvents)
 	}
 
 	return buf.String()
 }
 
-func (c *Collector) renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, nextWeekEvents []model.WorkRecord) string {
+func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, nextWeekEvents []model.WorkRecord) string {
 	md := fmt.Sprintf("## 本周完成工作 (%s ~ %s)\n\n", r.WeekStart, r.WeekEnd)
 
 	var tasks, meetings, docs []model.WorkRecord
@@ -295,7 +447,14 @@ func (c *Collector) renderMarkdownFallback(r *model.WeeklyReport, records []mode
 		md += "- 本周暂无记录\n\n"
 	}
 
-	md += "## 遇到的问题\n\n- 待补充\n"
+	md += "## 遇到的问题\n\n"
+	if problems := extractProblems(records); len(problems) > 0 {
+		for _, p := range problems {
+			md += fmt.Sprintf("- %s\n", p)
+		}
+	} else {
+		md += "- （本周暂无自动识别到的问题，请补充）\n"
+	}
 
 	md += "\n## 下周计划\n\n"
 	if len(nextWeekEvents) > 0 {
@@ -353,6 +512,8 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 		})
 	}
 
+	problems := extractProblems(records)
+
 	return model.ReportTemplateData{
 		WeekStart:      report.WeekStart,
 		WeekEnd:        report.WeekEnd,
@@ -361,6 +522,7 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 		Meetings:       meetings,
 		Docs:           docs,
 		NextWeekEvents: nextItems,
+		Problems:       problems,
 		TaskCount:      len(tasks),
 		MeetingCount:   len(meetings),
 		DocCount:       len(docs),
@@ -369,5 +531,6 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 		HasMeetings:    len(meetings) > 0,
 		HasDocs:        len(docs) > 0,
 		HasNextWeek:    len(nextItems) > 0,
+		HasProblems:    len(problems) > 0,
 	}
 }

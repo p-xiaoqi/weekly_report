@@ -12,10 +12,10 @@ import (
 
 // GitLabCommit GitLab 提交记录
 type GitLabCommit struct {
-	ID        string `json:"id"`
-	Message   string `json:"message"`
+	ID         string `json:"id"`
+	Message    string `json:"message"`
 	AuthorName string `json:"author_name"`
-	CreatedAt string `json:"created_at"`
+	CreatedAt  string `json:"created_at"`
 }
 
 // GitLabSource GitLab 数据源实现

@@ -12,14 +12,24 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
 	"weekly-report-system/internal/adapter/lark"
+	"weekly-report-system/internal/application/collector"
 	"weekly-report-system/internal/config"
 	"weekly-report-system/internal/model"
 	"weekly-report-system/internal/store"
 )
+
+// authCookies 生成与生产环境一致的 JWT + user_id cookie，用于通过 authMiddleware
+func authCookies(userID string) []*http.Cookie {
+	claims := jwt.MapClaims{"user_id": userID, "exp": time.Now().Add(time.Hour).Unix()}
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	s, _ := tok.SignedString([]byte(cfg.JWT.Secret))
+	return []*http.Cookie{{Name: "token", Value: s}, {Name: "user_id", Value: userID}}
+}
 
 func setupTestServer(t *testing.T) (*gin.Engine, *store.Store) {
 	gin.SetMode(gin.TestMode)
@@ -58,30 +68,39 @@ func setupTestServer(t *testing.T) (*gin.Engine, *store.Store) {
 	cfg.Feishu.AppSecret = "test_secret"
 	cfg.Feishu.RedirectURI = "http://localhost:8080/callback"
 	storeDB = s
+	store.SetTokenKey(cfg.JWT.Secret)
 	larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret)
+	collectorSvc = collector.New(lark.NewAdapter(larkClient), s)
 
 	r := gin.New()
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 	r.NoRoute(gin.WrapH(http.FileServer(http.Dir("./web"))))
+	// 公开路由
 	r.GET("/api/v1/auth/lark/login", larkLoginHandler)
 	r.GET("/api/v1/auth/lark/callback", larkCallbackHandler)
-	r.POST("/api/v1/collect", collectHandler)
-	r.POST("/api/v1/collect/browser", browserCollectHandler)
-	r.GET("/api/v1/reports/:week", getReportHandler)
-	r.GET("/api/v1/reports", listReportsHandler)
-	r.GET("/api/v1/export/:week", exportHandler)
-	r.GET("/api/v1/datasources", listDataSourcesHandler)
-	r.POST("/api/v1/datasources", createDataSourceHandler)
-	r.GET("/api/v1/datasources/:id", getDataSourceHandler)
-	r.PUT("/api/v1/datasources/:id", updateDataSourceHandler)
-	r.DELETE("/api/v1/datasources/:id", deleteDataSourceHandler)
-	r.GET("/api/v1/templates", listTemplatesHandler)
-	r.POST("/api/v1/templates", createTemplateHandler)
-	r.GET("/api/v1/templates/:id", getTemplateHandler)
-	r.PUT("/api/v1/templates/:id", updateTemplateHandler)
-	r.DELETE("/api/v1/templates/:id", deleteTemplateHandler)
+
+	// 需要登录的路由（与生产环境一致）
+	authorized := r.Group("/")
+	authorized.Use(authMiddleware())
+	{
+		authorized.POST("/api/v1/collect", collectHandler)
+		authorized.POST("/api/v1/collect/browser", browserCollectHandler)
+		authorized.GET("/api/v1/reports/:week", getReportHandler)
+		authorized.GET("/api/v1/reports", listReportsHandler)
+		authorized.GET("/api/v1/export/:week", exportHandler)
+		authorized.GET("/api/v1/datasources", listDataSourcesHandler)
+		authorized.POST("/api/v1/datasources", createDataSourceHandler)
+		authorized.GET("/api/v1/datasources/:id", getDataSourceHandler)
+		authorized.PUT("/api/v1/datasources/:id", updateDataSourceHandler)
+		authorized.DELETE("/api/v1/datasources/:id", deleteDataSourceHandler)
+		authorized.GET("/api/v1/templates", listTemplatesHandler)
+		authorized.POST("/api/v1/templates", createTemplateHandler)
+		authorized.GET("/api/v1/templates/:id", getTemplateHandler)
+		authorized.PUT("/api/v1/templates/:id", updateTemplateHandler)
+		authorized.DELETE("/api/v1/templates/:id", deleteTemplateHandler)
+	}
 
 	return r, s
 }
@@ -164,7 +183,9 @@ func TestCreateAndGetReport(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/reports/2026-06-23", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -175,8 +196,9 @@ func TestCreateAndGetReport(t *testing.T) {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 	data := resp["data"].(map[string]interface{})
-	if data["week_start"] != "2026-06-23" {
-		t.Errorf("expected week_start 2026-06-23, got %v", data["week_start"])
+	reportData := data["report"].(map[string]interface{})
+	if reportData["week_start"] != "2026-06-23" {
+		t.Errorf("expected week_start 2026-06-23, got %v", reportData["week_start"])
 	}
 }
 
@@ -185,7 +207,9 @@ func TestGetReportNotFound(t *testing.T) {
 	r, _ := setupTestServer(t)
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/reports/2099-01-01", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 404 {
@@ -207,7 +231,9 @@ func TestExportMarkdown(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/export/2026-06-23?format=markdown", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -235,7 +261,9 @@ func TestExportWord(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/export/2026-06-23?format=word", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -249,7 +277,7 @@ func TestExportWord(t *testing.T) {
 	}
 }
 
-// TC-EXPORT-003: 导出 PDF（返回打印 HTML）
+// TC-EXPORT-003: 导出 PDF（返回真实 PDF 文件）
 func TestExportPDF(t *testing.T) {
 	r, s := setupTestServer(t)
 
@@ -263,25 +291,31 @@ func TestExportPDF(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/export/2026-06-23?format=pdf", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
 		t.Errorf("expected status 200, got %d", w.Code)
 	}
-	if !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
-		t.Errorf("expected Content-Type text/html, got %s", w.Header().Get("Content-Type"))
+	if !strings.Contains(w.Header().Get("Content-Type"), "application/pdf") {
+		t.Errorf("expected Content-Type application/pdf, got %s", w.Header().Get("Content-Type"))
 	}
-	body := w.Body.String()
-	if !strings.Contains(body, "<!DOCTYPE html>") {
-		t.Errorf("expected HTML doctype in body")
+	if !strings.Contains(w.Header().Get("Content-Disposition"), "weekly-report-2026-06-23.pdf") {
+		t.Errorf("expected pdf attachment filename, got %s", w.Header().Get("Content-Disposition"))
 	}
-	if !strings.Contains(body, "window.print()") {
-		t.Errorf("expected print button in body")
+	body := w.Body.Bytes()
+	if len(body) < 4 || string(body[:4]) != "%PDF" {
+		t.Errorf("expected body to start with %%PDF magic header, got % x", body[:min(4, len(body))])
 	}
-	if !strings.Contains(body, "任务1") {
-		t.Errorf("expected markdown content rendered in HTML")
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
+	return b
 }
 
 // TC-EXPORT-004: 导出不支持的格式返回 400
@@ -298,7 +332,9 @@ func TestExportInvalidFormat(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/export/2026-06-23?format=excel", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 400 {
@@ -311,7 +347,9 @@ func TestExportReportNotFound(t *testing.T) {
 	r, _ := setupTestServer(t)
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/export/2099-01-01?format=pdf", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 404 {
@@ -336,6 +374,9 @@ func TestBrowserCollect(t *testing.T) {
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("POST", "/api/v1/collect/browser", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -343,7 +384,7 @@ func TestBrowserCollect(t *testing.T) {
 	}
 
 	// 验证周报已生成
-	report, ok := s.GetReport("browser_user_001", "2026-06-23")
+	report, ok := s.GetReport("user_test_001", "2026-06-23")
 	if !ok {
 		t.Errorf("expected report to be created after browser collect")
 	}
@@ -366,7 +407,9 @@ func TestCreateDataSource(t *testing.T) {
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("POST", "/api/v1/datasources", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -410,7 +453,9 @@ func TestListDataSources(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/datasources", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -438,7 +483,9 @@ func TestDeleteDataSource(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("DELETE", fmt.Sprintf("/api/v1/datasources/%d", ds.ID), nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -461,7 +508,9 @@ func TestListTemplates(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/v1/templates", nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -489,7 +538,9 @@ func TestCreateTemplate(t *testing.T) {
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("POST", "/api/v1/templates", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {
@@ -510,7 +561,9 @@ func TestDeleteTemplate(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("DELETE", fmt.Sprintf("/api/v1/templates/%d", tmpl.ID), nil)
-	req.AddCookie(&http.Cookie{Name: "user_id", Value: "user_test_001"})
+	for _, ck := range authCookies("user_test_001") {
+		req.AddCookie(ck)
+	}
 	r.ServeHTTP(w, req)
 
 	if w.Code != 200 {

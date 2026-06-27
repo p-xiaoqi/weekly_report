@@ -198,6 +198,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 async function sendToBackend(records, userID) {
   const response = await fetch('http://localhost:8080/api/v1/collect/browser', {
     method: 'POST',
+    credentials: 'include', // 携带 localhost:8080 的登录会话 Cookie（端点已需鉴权）
     headers: {
       'Content-Type': 'application/json'
     },

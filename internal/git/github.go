@@ -23,9 +23,9 @@ type GitHubCommit struct {
 
 // GitHubSource GitHub 数据源实现
 type GitHubSource struct {
-	Token  string
-	Owner  string
-	Repo   string
+	Token string
+	Owner string
+	Repo  string
 }
 
 // FetchCommits 分页拉取本周提交

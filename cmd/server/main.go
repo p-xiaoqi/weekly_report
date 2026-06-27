@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -11,27 +11,39 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 
 	"weekly-report-system/internal/adapter/lark"
+	"weekly-report-system/internal/application/collector"
 	"weekly-report-system/internal/config"
+	"weekly-report-system/internal/database"
+	"weekly-report-system/internal/git"
 	"weekly-report-system/internal/model"
+	"weekly-report-system/internal/reminder"
+	"weekly-report-system/internal/response"
 	"weekly-report-system/internal/store"
 
 	"github.com/fumiama/go-docx"
+	"github.com/signintech/gopdf"
 )
 
+// cjkFontData 内嵌的中文 TTF 字体（SimHei），用于 PDF 导出时渲染中文。
+// 若构建环境无中文字体可用，应替换为其他 CJK TTF；缺失时 PDF 仍可生成，
+// 但中文字形可能无法正确显示。
+//
+//go:embed assets/fonts/SimHei.ttf
+var cjkFontData []byte
+
 var (
-	cfg       *config.Config
-	storeDB   *store.Store
-	larkClient *lark.Client
+	cfg          *config.Config
+	storeDB      *store.Store
+	larkClient   *lark.Client
+	collectorSvc *collector.Collector
+	reminderSvc  *reminder.ReminderService
 
 	// 简单内存限流器
 	rateLimiter = NewRateLimiter(10, time.Second)
@@ -82,7 +94,7 @@ func rateLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
 		if !rateLimiter.Allow(ip) {
-			c.JSON(429, gin.H{"error": "请求过于频繁，请稍后重试"})
+			response.Fail(c, http.StatusTooManyRequests, response.CodeTooManyRequests, "请求过于频繁，请稍后重试")
 			c.Abort()
 			return
 		}
@@ -95,7 +107,7 @@ func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenString, err := c.Cookie("token")
 		if err != nil || tokenString == "" {
-			c.JSON(401, gin.H{"error": "未登录"})
+			response.FailUnauthorized(c, "未登录")
 			c.Abort()
 			return
 		}
@@ -107,7 +119,7 @@ func authMiddleware() gin.HandlerFunc {
 			return []byte(cfg.JWT.Secret), nil
 		})
 		if err != nil || !token.Valid {
-			c.JSON(401, gin.H{"error": "登录已过期，请重新登录"})
+			response.Fail(c, http.StatusUnauthorized, response.CodeTokenExpired, "登录已过期，请重新登录")
 			c.Abort()
 			return
 		}
@@ -115,18 +127,34 @@ func authMiddleware() gin.HandlerFunc {
 		// 验证 token 中的 user_id 与 cookie 中的 user_id 是否一致
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
-			c.JSON(401, gin.H{"error": "无效的登录凭证"})
+			response.FailUnauthorized(c, "无效的登录凭证")
 			c.Abort()
 			return
 		}
 		tokenUserID, _ := claims["user_id"].(string)
 		cookieUserID, _ := c.Cookie("user_id")
 		if subtle.ConstantTimeCompare([]byte(tokenUserID), []byte(cookieUserID)) != 1 {
-			c.JSON(401, gin.H{"error": "登录凭证不匹配"})
+			response.FailUnauthorized(c, "登录凭证不匹配")
 			c.Abort()
 			return
 		}
 
+		c.Next()
+	}
+}
+
+// adminMiddleware 在 authMiddleware 之后运行，校验当前登录用户是否为管理员。
+// 身份取自已验证的 user_id Cookie（即飞书 OpenID），从数据库加载用户后判断 Role。
+// 非管理员一律拒绝，返回 HTTP 403。
+func adminMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, _ := c.Cookie("user_id")
+		user, err := storeDB.GetUserByFeishuOpenID(userID)
+		if err != nil || user == nil || user.Role != "admin" {
+			response.FailForbidden(c, "forbidden: admin only")
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
@@ -138,8 +166,11 @@ func main() {
 		panic(err)
 	}
 
-	// 初始化数据库
-	db, err := gorm.Open(sqlite.Open(cfg.Database.Path), &gorm.Config{})
+	// Token 加密密钥派生自 JWT Secret
+	store.SetTokenKey(cfg.JWT.Secret)
+
+	// 初始化数据库（WAL + 连接池）
+	db, err := database.Init(cfg.Database.Path)
 	if err != nil {
 		panic(fmt.Sprintf("open db failed: %v", err))
 	}
@@ -153,6 +184,7 @@ func main() {
 		&model.AuditLog{},
 		&model.CronJob{},
 		&model.ReportComment{},
+		&model.FeishuToken{},
 	); err != nil {
 		panic(fmt.Sprintf("migrate db failed: %v", err))
 	}
@@ -160,6 +192,16 @@ func main() {
 	storeDB = store.New(db)
 	storeDB.InitDefaultTemplates()
 	larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret)
+
+	// 采集服务
+	larkAdapter := lark.NewAdapter(larkClient)
+	collectorSvc = collector.New(larkAdapter, storeDB)
+
+	// 提醒服务
+	reminderSvc = reminder.NewReminderService(storeDB)
+	if cfg.Reminder.Enabled {
+		reminderSvc.Start(cfg.Reminder.Cron, cfg.Reminder.BotWebhook)
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	if cfg.Server.Mode == "debug" {
@@ -214,9 +256,6 @@ func main() {
 	r.GET("/api/v1/auth/lark/callback", larkCallbackHandler)
 	r.POST("/api/v1/auth/logout", logoutHandler)
 
-	// 浏览器插件推送（不需要 JWT，但有自己的用户映射）
-	r.POST("/api/v1/collect/browser", browserCollectHandler)
-
 	// 需要登录的 API
 	authorized := r.Group("/")
 	authorized.Use(authMiddleware())
@@ -224,12 +263,19 @@ func main() {
 		// 周报收集
 		authorized.POST("/api/v1/collect", collectHandler)
 
+		// 浏览器插件推送（身份来自已验证的会话）
+		authorized.POST("/api/v1/collect/browser", browserCollectHandler)
+
 		// 周报查询
 		authorized.GET("/api/v1/reports/:week", getReportHandler)
+		authorized.PUT("/api/v1/reports/:week", updateReportHandler)
 		authorized.GET("/api/v1/reports", listReportsHandler)
 		authorized.POST("/api/v1/reports/:week/submit", submitReportHandler)
 		authorized.GET("/api/v1/reports/:week/compare", compareReportHandler)
 		authorized.GET("/api/v1/reports/:week/versions", listReportVersionsHandler)
+
+		// 统计
+		authorized.GET("/api/v1/stats", statsHandler)
 
 		// 批注
 		authorized.GET("/api/v1/reports/:week/comments", listCommentsHandler)
@@ -254,15 +300,19 @@ func main() {
 		authorized.PUT("/api/v1/templates/:id", updateTemplateHandler)
 		authorized.DELETE("/api/v1/templates/:id", deleteTemplateHandler)
 
-		// 提醒测试
-		authorized.POST("/api/v1/admin/remind", testRemindHandler)
+		// 提醒测试（仅管理员可调用）
+		admin := authorized.Group("/api/v1/admin")
+		admin.Use(adminMiddleware())
+		{
+			admin.POST("/remind", testRemindHandler)
+		}
 	}
 
 	// 前端页面
 	r.NoRoute(func(c *gin.Context) {
 		// API 路径未匹配，返回 JSON 404
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
-			c.JSON(404, gin.H{"error": "接口不存在"})
+			response.FailNotFound(c, "接口不存在")
 			return
 		}
 		// 根路径重定向到 test.html
@@ -314,11 +364,11 @@ func authStatusHandler(c *gin.Context) {
 	var sourceList []gin.H
 	for _, s := range sources {
 		sourceList = append(sourceList, gin.H{
-			"id":       s.ID,
-			"source":   s.Type,
-			"name":     s.Name,
-			"enabled":  s.Enabled,
-			"sync_status": s.SyncStatus,
+			"id":           s.ID,
+			"source":       s.Type,
+			"name":         s.Name,
+			"enabled":      s.Enabled,
+			"sync_status":  s.SyncStatus,
 			"last_sync_at": s.LastSyncAt,
 		})
 	}
@@ -347,7 +397,7 @@ func larkLoginHandler(c *gin.Context) {
 func larkCallbackHandler(c *gin.Context) {
 	code := c.Query("code")
 	if code == "" {
-		c.JSON(400, gin.H{"error": "缺少 code 参数"})
+		response.FailParam(c, "缺少 code 参数")
 		return
 	}
 
@@ -356,7 +406,7 @@ func larkCallbackHandler(c *gin.Context) {
 
 	userTokenInfo, err := larkClient.GetUserAccessToken(ctx, code)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "获取 token 失败: " + err.Error()})
+		response.Fail(c, http.StatusInternalServerError, response.CodeLoginFailed, "获取 token 失败: "+err.Error())
 		return
 	}
 
@@ -366,7 +416,7 @@ func larkCallbackHandler(c *gin.Context) {
 		Name:         userTokenInfo.Name,
 	}
 	if err := storeDB.CreateOrUpdateUser(user); err != nil {
-		c.JSON(500, gin.H{"error": "保存用户失败: " + err.Error()})
+		response.FailInternal(c, "保存用户失败: "+err.Error())
 		return
 	}
 
@@ -378,7 +428,7 @@ func larkCallbackHandler(c *gin.Context) {
 	jwtToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := jwtToken.SignedString([]byte(cfg.JWT.Secret))
 	if err != nil {
-		c.JSON(500, gin.H{"error": "生成 JWT 失败"})
+		response.FailInternal(c, "生成 JWT 失败")
 		return
 	}
 
@@ -401,107 +451,74 @@ func logoutHandler(c *gin.Context) {
 }
 
 func collectHandler(c *gin.Context) {
+
 	userID, _ := c.Cookie("user_id")
 
 	var req struct {
-		WeekStart   string   `json:"week_start"`
+		WeekStart string `json:"week_start"`
+
 		DataSources []string `json:"data_sources"`
-		TemplateID  uint     `json:"template_id"`
+
+		TemplateID uint `json:"template_id"`
 	}
+
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "请求格式错误"})
+
+		response.FailParam(c, "请求格式错误")
+
 		return
+
 	}
+
 	if req.WeekStart == "" {
-		c.JSON(400, gin.H{"error": "缺少 week_start 参数"})
+
+		response.FailParam(c, "缺少 week_start 参数")
+
 		return
+
 	}
 
-	var allRecords []model.WorkRecord
-	var sourceTypes []string
+	weekStartT, err := time.Parse("2006-01-02", req.WeekStart)
 
-	// 如果没有指定数据源，默认使用 lark
-	if len(req.DataSources) == 0 {
-		req.DataSources = []string{"lark"}
+	if err != nil {
+
+		response.FailParam(c, "week_start 格式错误，应为 YYYY-MM-DD")
+
+		return
+
 	}
 
-	for _, source := range req.DataSources {
-		switch source {
-		case "lark":
-			accessToken, ok := storeDB.GetToken(userID)
-			if !ok {
-				c.JSON(500, gin.H{"error": "飞书 token 已过期，请重新登录"})
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 
-			tasks, err := larkClient.FetchUserTasks(ctx, accessToken)
-			if err != nil {
-				c.JSON(500, gin.H{"error": "获取飞书任务失败: " + err.Error()})
-				return
-			}
-			for _, t := range tasks {
-				allRecords = append(allRecords, model.WorkRecord{
-					UserID:      userID,
-					SourceType:  "lark",
-					RecordType:  model.TypeTask,
-					Title:       t.Summary,
-					Description: t.Notes,
-					ExternalID:  t.GUID,
-					WeekStart:   req.WeekStart,
-					OccurredAt:  parseTimeOrNow(t.CompletedTime),
-				})
-			}
-			sourceTypes = append(sourceTypes, "lark")
-		default:
-			// 其他数据源暂不支持实时采集
-			sourceTypes = append(sourceTypes, source)
-		}
-	}
+	defer cancel()
 
-	storeDB.SaveWorkRecords(allRecords)
+	report, warnings, err := collectorSvc.Collect(ctx, model.CollectionRequest{
 
-	// 获取模板
-	var template *model.Template
-	if req.TemplateID > 0 {
-		t, _ := storeDB.GetTemplateByID(req.TemplateID)
-		if t != nil {
-			template = t
-		}
-	}
-	if template == nil {
-		user, _ := storeDB.GetUserByFeishuOpenID(userID)
-		role := "member"
-		if user != nil && user.Role != "" {
-			role = user.Role
-		}
-		template, _ = storeDB.GetDefaultTemplate(role)
-	}
-
-	// 生成周报
-	report := generateWeeklyReport(userID, req.WeekStart, allRecords, template)
-	storeDB.SaveReport(report)
-
-	// 记录审计日志
-	storeDB.LogAudit(userID, "generate", "report", report.ID,
-		fmt.Sprintf("生成了周报，数据源: %v，记录数: %d", sourceTypes, len(allRecords)), c.ClientIP())
-
-	c.JSON(200, gin.H{
-		"code": 0,
-		"data": gin.H{
-			"report":      report,
-			"records":     allRecords,
-			"source_types": sourceTypes,
-			"auto_stats": gin.H{
-				"task_count": len(allRecords),
-				"sources":    sourceTypes,
-			},
-		},
+		UserID: userID, WeekStart: weekStartT, DataSources: req.DataSources, TemplateID: req.TemplateID,
 	})
+
+	if err != nil {
+
+		response.Fail(c, http.StatusInternalServerError, response.CodeCollectFailed, "生成周报失败: "+err.Error())
+
+		return
+
+	}
+
+	records, _ := storeDB.GetWorkRecords(userID, req.WeekStart)
+
+	storeDB.LogAudit(userID, "generate", "report", report.ID,
+
+		fmt.Sprintf("生成周报，数据源:%v，记录数:%d", req.DataSources, len(records)), c.ClientIP())
+
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{"report": report, "records": records,
+
+		"auto_stats": gin.H{"task_count": len(records)}}, "warnings": warnings})
+
 }
 
 func browserCollectHandler(c *gin.Context) {
+	userID, _ := c.Cookie("user_id")
 	var req struct {
 		UserID    string `json:"user_id"`
 		WeekStart string `json:"week_start"`
@@ -513,28 +530,18 @@ func browserCollectHandler(c *gin.Context) {
 		} `json:"records"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "请求格式错误"})
+		response.FailParam(c, "请求格式错误")
 		return
 	}
 	if req.WeekStart == "" {
-		c.JSON(400, gin.H{"error": "缺少 week_start 参数"})
+		response.FailParam(c, "缺少 week_start 参数")
 		return
-	}
-
-	realUserID := storeDB.GetRealUserID(req.UserID)
-	if realUserID == req.UserID {
-		// 首次推送，尝试从 cookie 获取映射
-		cookieUserID, _ := c.Cookie("user_id")
-		if cookieUserID != "" {
-			storeDB.SetUserMapping(req.UserID, cookieUserID)
-			realUserID = cookieUserID
-		}
 	}
 
 	var records []model.WorkRecord
 	for _, r := range req.Records {
 		records = append(records, model.WorkRecord{
-			UserID:      realUserID,
+			UserID:      userID,
 			SourceType:  r.Source,
 			RecordType:  model.TypeManual,
 			Title:       r.Title,
@@ -546,10 +553,22 @@ func browserCollectHandler(c *gin.Context) {
 	}
 	storeDB.SaveWorkRecords(records)
 
-	report := generateWeeklyReport(realUserID, req.WeekStart, records, nil)
+	// 复用采集主流程的模板渲染逻辑，保证插件推送与主链路格式一致
+	report := &model.WeeklyReport{
+		UserID:    userID,
+		WeekStart: req.WeekStart,
+		WeekEnd:   req.WeekStart,
+		Status:    "draft",
+	}
+	var templateContent string
+	if t, err := storeDB.GetDefaultTemplate(""); err == nil && t != nil {
+		templateContent = t.Content
+		report.TemplateID = t.ID
+	}
+	report.Markdown = collector.RenderReport(report, records, nil, templateContent)
 	storeDB.SaveReport(report)
 
-	storeDB.LogAudit(realUserID, "collect", "report", report.ID,
+	storeDB.LogAudit(userID, "collect", "report", report.ID,
 		fmt.Sprintf("浏览器插件推送 %d 条记录", len(records)), c.ClientIP())
 
 	c.JSON(200, gin.H{"code": 0, "data": report})
@@ -560,7 +579,7 @@ func getReportHandler(c *gin.Context) {
 	weekStr := c.Param("week")
 	report, ok := storeDB.GetReport(userID, weekStr)
 	if !ok {
-		c.JSON(404, gin.H{"error": "周报不存在"})
+		response.Fail(c, http.StatusNotFound, response.CodeReportNotFound, "周报不存在")
 		return
 	}
 
@@ -577,6 +596,63 @@ func getReportHandler(c *gin.Context) {
 	})
 }
 
+// updateReportHandler 编辑周报草稿（owner-scoped）。
+// 接受 JSON {markdown?, summary?, problems?, plans?, status?}，以 markdown 作为
+// 草稿正文的权威来源；若提供了结构化字段则写入 Content(JSON)。
+// 编辑成功后复用既有版本机制创建一次版本快照，并返回更新后的周报。
+func updateReportHandler(c *gin.Context) {
+	userID, _ := c.Cookie("user_id")
+	weekStr := c.Param("week")
+
+	report, ok := storeDB.GetReport(userID, weekStr)
+	if !ok {
+		response.Fail(c, http.StatusNotFound, response.CodeReportNotFound, "周报不存在")
+		return
+	}
+
+	var req struct {
+		Markdown string `json:"markdown"`
+		Summary  string `json:"summary"`
+		Problems string `json:"problems"`
+		Plans    string `json:"plans"`
+		Status   string `json:"status"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.FailParam(c, "请求格式错误")
+		return
+	}
+
+	// markdown 为草稿正文的权威来源
+	if req.Markdown != "" {
+		report.Markdown = req.Markdown
+	}
+	// 若提供任一结构化字段，则合并保存到 Content(JSON)
+	if req.Summary != "" || req.Problems != "" || req.Plans != "" {
+		structured := map[string]string{"work": req.Summary, "problems": req.Problems, "plans": req.Plans}
+		if b, err := json.Marshal(structured); err == nil {
+			report.Content = string(b)
+		}
+	}
+	if req.Status != "" {
+		report.Status = req.Status
+	}
+	report.UpdatedAt = time.Now()
+	storeDB.SaveReport(report)
+
+	// 复用既有版本机制，记录一次版本快照
+	report.Version++
+	storeDB.SaveReportVersion(&model.WeeklyReportVersion{
+		ReportID: report.ID,
+		Content:  report.Markdown,
+		Version:  report.Version,
+	})
+	storeDB.SaveReport(report)
+
+	storeDB.LogAudit(userID, "edit", "report", report.ID, "编辑周报草稿", c.ClientIP())
+
+	response.OK(c, gin.H{"report": report})
+}
+
 func listReportsHandler(c *gin.Context) {
 	userID, _ := c.Cookie("user_id")
 	reports := storeDB.ListReports(userID)
@@ -589,7 +665,7 @@ func submitReportHandler(c *gin.Context) {
 
 	report, ok := storeDB.GetReport(userID, weekStr)
 	if !ok {
-		c.JSON(404, gin.H{"error": "周报不存在"})
+		response.Fail(c, http.StatusNotFound, response.CodeReportNotFound, "周报不存在")
 		return
 	}
 
@@ -614,27 +690,86 @@ func submitReportHandler(c *gin.Context) {
 }
 
 func compareReportHandler(c *gin.Context) {
+
 	userID, _ := c.Cookie("user_id")
+
 	weekStr := c.Param("week")
 
 	current, ok := storeDB.GetReport(userID, weekStr)
+
 	if !ok {
-		c.JSON(404, gin.H{"error": "周报不存在"})
+
+		response.Fail(c, http.StatusNotFound, response.CodeReportNotFound, "周报不存在")
+
 		return
+
 	}
 
-	// 查找上一周
 	prevWeekStart := getPreviousWeekStart(weekStr)
+
 	previous, _ := storeDB.GetReport(userID, prevWeekStart)
 
-	c.JSON(200, gin.H{
-		"code": 0,
-		"data": gin.H{
-			"current":  current,
-			"previous": previous,
-			"has_previous": previous != nil,
-		},
-	})
+	curRecs, _ := storeDB.GetWorkRecords(userID, weekStr)
+
+	prevRecs, _ := storeDB.GetWorkRecords(userID, prevWeekStart)
+
+	countByType := func(recs []model.WorkRecord) gin.H {
+
+		var task, meeting, doc, commit int
+
+		for _, r := range recs {
+
+			switch r.RecordType {
+
+			case model.TypeMeeting:
+
+				meeting++
+
+			case model.TypeDoc:
+
+				doc++
+
+			case model.TypeCommit:
+
+				commit++
+
+			default:
+
+				task++
+
+			}
+
+		}
+
+		return gin.H{"task_count": task, "meeting_count": meeting, "doc_count": doc, "commit_count": commit, "total": len(recs)}
+
+	}
+
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{
+
+		"current": current, "previous": previous, "has_previous": previous != nil,
+
+		"current_stats": countByType(curRecs), "previous_stats": countByType(prevRecs),
+	}})
+
+}
+
+func statsHandler(c *gin.Context) {
+
+	userID, _ := c.Cookie("user_id")
+
+	stats, err := storeDB.GetWeeklyStats(userID, 8)
+
+	if err != nil {
+
+		response.FailInternal(c, err.Error())
+
+		return
+
+	}
+
+	c.JSON(200, gin.H{"code": 0, "data": stats})
+
 }
 
 func listReportVersionsHandler(c *gin.Context) {
@@ -643,7 +778,7 @@ func listReportVersionsHandler(c *gin.Context) {
 
 	report, ok := storeDB.GetReport(userID, weekStr)
 	if !ok {
-		c.JSON(404, gin.H{"error": "周报不存在"})
+		response.Fail(c, http.StatusNotFound, response.CodeReportNotFound, "周报不存在")
 		return
 	}
 
@@ -657,7 +792,7 @@ func listCommentsHandler(c *gin.Context) {
 
 	report, ok := storeDB.GetReport(userID, weekStr)
 	if !ok {
-		c.JSON(404, gin.H{"error": "周报不存在"})
+		response.Fail(c, http.StatusNotFound, response.CodeReportNotFound, "周报不存在")
 		return
 	}
 
@@ -671,7 +806,7 @@ func addCommentHandler(c *gin.Context) {
 
 	report, ok := storeDB.GetReport(userID, weekStr)
 	if !ok {
-		c.JSON(404, gin.H{"error": "周报不存在"})
+		response.Fail(c, http.StatusNotFound, response.CodeReportNotFound, "周报不存在")
 		return
 	}
 
@@ -679,7 +814,7 @@ func addCommentHandler(c *gin.Context) {
 		Content string `json:"content"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "请求格式错误"})
+		response.FailParam(c, "请求格式错误")
 		return
 	}
 
@@ -706,7 +841,7 @@ func exportHandler(c *gin.Context) {
 	weekStr := c.Param("week")
 	report, ok := storeDB.GetReport(userID, weekStr)
 	if !ok {
-		c.JSON(404, gin.H{"error": "周报不存在"})
+		response.Fail(c, http.StatusNotFound, response.CodeReportNotFound, "周报不存在")
 		return
 	}
 	format := c.Query("format")
@@ -740,16 +875,104 @@ func exportHandler(c *gin.Context) {
 			}
 		}
 		if _, err := file.WriteTo(c.Writer); err != nil {
-			c.JSON(500, gin.H{"error": "生成 Word 文件失败: " + err.Error()})
+			response.Fail(c, http.StatusInternalServerError, response.CodeExportFailed, "生成 Word 文件失败: "+err.Error())
 			return
 		}
 	case "pdf":
+		data, err := generatePDF(report.Markdown)
+		if err != nil {
+			response.Fail(c, http.StatusInternalServerError, response.CodeExportFailed, "生成 PDF 失败: "+err.Error())
+			return
+		}
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"weekly-report-%s.pdf\"", weekStr))
+		c.Data(200, "application/pdf", data)
+	case "html":
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"周报_%s_%s.html\"", userID, weekStr))
 		generateHTMLPrintPage(report.Markdown, c.Writer)
 	default:
-		c.JSON(400, gin.H{"error": "不支持的导出格式"})
+		response.FailParam(c, "不支持的导出格式")
 	}
+}
+
+// generatePDF 使用纯 Go 的 gopdf 库将周报 Markdown 渲染为真实 PDF。
+// 内嵌 SimHei TTF 以支持中文；对长行按字符宽度自动换行，并做轻量 Markdown 去标记。
+// 注意：若内嵌字体缺失，将无法加载 CJK 字形，中文可能无法显示（见 cjkFontData 注释）。
+func generatePDF(markdown string) ([]byte, error) {
+	const (
+		marginLeft = 40.0
+		marginTop  = 40.0
+		pageW      = 595.28 // A4 宽（pt）
+		pageH      = 841.89 // A4 高（pt）
+		lineHeight = 18.0
+		fontSize   = 13.0
+	)
+
+	pdf := gopdf.GoPdf{}
+	pdf.Start(gopdf.Config{PageSize: *gopdf.PageSizeA4})
+	pdf.AddPage()
+	if err := pdf.AddTTFFontData("cjk", cjkFontData); err != nil {
+		return nil, err
+	}
+	if err := pdf.SetFont("cjk", "", fontSize); err != nil {
+		return nil, err
+	}
+
+	maxWidth := pageW - 2*marginLeft
+	y := marginTop
+	for _, raw := range strings.Split(markdown, "\n") {
+		line := stripMarkdownLine(raw)
+		if line == "" {
+			y += lineHeight / 2
+			continue
+		}
+		for _, seg := range wrapPDFText(&pdf, line, maxWidth) {
+			if y+lineHeight > pageH-marginTop {
+				pdf.AddPage()
+				y = marginTop
+			}
+			pdf.SetXY(marginLeft, y)
+			if err := pdf.Cell(nil, seg); err != nil {
+				return nil, err
+			}
+			y += lineHeight
+		}
+	}
+	return pdf.GetBytesPdf(), nil
+}
+
+// stripMarkdownLine 去除常见 Markdown 行首标记，得到适合纯文本排版的内容。
+func stripMarkdownLine(line string) string {
+	line = strings.TrimSpace(line)
+	for _, p := range []string{"### ", "## ", "# ", "- [x] ", "- [ ] ", "- ", "* "} {
+		if strings.HasPrefix(line, p) {
+			line = strings.TrimPrefix(line, p)
+			break
+		}
+	}
+	return line
+}
+
+// wrapPDFText 按测量宽度对文本做逐字符换行，确保不超出页面可用宽度。
+func wrapPDFText(pdf *gopdf.GoPdf, text string, maxWidth float64) []string {
+	var lines []string
+	var cur []rune
+	for _, r := range text {
+		test := string(append(cur, r))
+		if w, err := pdf.MeasureTextWidth(test); err == nil && w > maxWidth && len(cur) > 0 {
+			lines = append(lines, string(cur))
+			cur = []rune{r}
+		} else {
+			cur = append(cur, r)
+		}
+	}
+	if len(cur) > 0 {
+		lines = append(lines, string(cur))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "")
+	}
+	return lines
 }
 
 func generateHTMLPrintPage(markdown string, w http.ResponseWriter) {
@@ -827,7 +1050,7 @@ func listDataSourcesHandler(c *gin.Context) {
 	userID, _ := c.Cookie("user_id")
 	dss, err := storeDB.GetDataSources(userID)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		response.FailInternal(c, err.Error())
 		return
 	}
 	// 不返回敏感 Config
@@ -854,7 +1077,7 @@ func createDataSourceHandler(c *gin.Context) {
 		Config map[string]interface{} `json:"config"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "请求格式错误"})
+		response.FailParam(c, "请求格式错误")
 		return
 	}
 	configJSON, _ := json.Marshal(req.Config)
@@ -865,7 +1088,7 @@ func createDataSourceHandler(c *gin.Context) {
 		Config: string(configJSON),
 	}
 	if err := storeDB.CreateDataSource(ds); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		response.FailInternal(c, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "message": "数据源创建成功"})
@@ -876,21 +1099,21 @@ func getDataSourceHandler(c *gin.Context) {
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
-		c.JSON(400, gin.H{"error": "无效的数据源 ID"})
+		response.FailParam(c, "无效的数据源 ID")
 		return
 	}
 	ds, err := storeDB.GetDataSourceByID(id)
 	if err != nil || ds == nil || ds.UserID != userID {
-		c.JSON(404, gin.H{"error": "数据源不存在"})
+		response.Fail(c, http.StatusNotFound, response.CodeDataSourceNotFound, "数据源不存在")
 		return
 	}
 	c.JSON(200, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"id":     ds.ID,
-			"type":   ds.Type,
-			"name":   ds.Name,
-			"config": ds.Config,
+			"id":      ds.ID,
+			"type":    ds.Type,
+			"name":    ds.Name,
+			"config":  ds.Config,
 			"enabled": ds.Enabled,
 		},
 	})
@@ -901,12 +1124,12 @@ func updateDataSourceHandler(c *gin.Context) {
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
-		c.JSON(400, gin.H{"error": "无效的数据源 ID"})
+		response.FailParam(c, "无效的数据源 ID")
 		return
 	}
 	old, err := storeDB.GetDataSourceByID(id)
 	if err != nil || old == nil || old.UserID != userID {
-		c.JSON(404, gin.H{"error": "数据源不存在"})
+		response.Fail(c, http.StatusNotFound, response.CodeDataSourceNotFound, "数据源不存在")
 		return
 	}
 	var req struct {
@@ -915,7 +1138,7 @@ func updateDataSourceHandler(c *gin.Context) {
 		Config map[string]interface{} `json:"config"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "请求格式错误"})
+		response.FailParam(c, "请求格式错误")
 		return
 	}
 	configJSON, _ := json.Marshal(req.Config)
@@ -923,7 +1146,7 @@ func updateDataSourceHandler(c *gin.Context) {
 	old.Name = req.Name
 	old.Config = string(configJSON)
 	if err := storeDB.UpdateDataSource(old); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		response.FailInternal(c, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "message": "数据源更新成功"})
@@ -934,19 +1157,87 @@ func deleteDataSourceHandler(c *gin.Context) {
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
-		c.JSON(400, gin.H{"error": "无效的数据源 ID"})
+		response.FailParam(c, "无效的数据源 ID")
 		return
 	}
 	if err := storeDB.DeleteDataSource(userID, id); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		response.FailInternal(c, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "message": "数据源删除成功"})
 }
 
 func testDataSourceHandler(c *gin.Context) {
-	// 模拟连接测试
-	c.JSON(200, gin.H{"code": 0, "message": "连接测试通过（模拟）"})
+	userID, _ := c.Cookie("user_id")
+	idStr := c.Param("id")
+	var id uint
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		response.FailParam(c, "无效的数据源 ID")
+		return
+	}
+	ds, err := storeDB.GetDataSourceByID(id)
+	if err != nil || ds == nil || ds.UserID != userID {
+		response.Fail(c, http.StatusNotFound, response.CodeDataSourceNotFound, "数据源不存在")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// 使用最近 7 天的窗口做一次轻量级真实请求
+	weekEnd := time.Now()
+	weekStart := weekEnd.AddDate(0, 0, -7)
+
+	switch ds.Type {
+	case "github":
+		var cfg struct {
+			Token  string `json:"token"`
+			Owner  string `json:"owner"`
+			Repo   string `json:"repo"`
+			Author string `json:"author"`
+		}
+		if err := json.Unmarshal([]byte(ds.Config), &cfg); err != nil {
+			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false, "message": "配置解析失败: " + err.Error()})
+			return
+		}
+		source := &git.GitHubSource{Token: cfg.Token, Owner: cfg.Owner, Repo: cfg.Repo}
+		commits, err := source.FetchCommits(ctx, cfg.Author, weekStart, weekEnd)
+		if err != nil {
+			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false, "message": "GitHub 连接失败: " + err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"code": response.CodeOK, "success": true,
+			"message": fmt.Sprintf("GitHub 连接成功，最近 7 天获取到 %d 条提交", len(commits))})
+	case "gitlab":
+		var cfg struct {
+			Token       string `json:"token"`
+			ServerURL   string `json:"server_url"`
+			ProjectPath string `json:"project_path"`
+			Email       string `json:"email"`
+		}
+		if err := json.Unmarshal([]byte(ds.Config), &cfg); err != nil {
+			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false, "message": "配置解析失败: " + err.Error()})
+			return
+		}
+		source := &git.GitLabSource{Token: cfg.Token, ServerURL: cfg.ServerURL, ProjectPath: cfg.ProjectPath}
+		commits, err := source.FetchCommits(ctx, cfg.Email, weekStart, weekEnd)
+		if err != nil {
+			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false, "message": "GitLab 连接失败: " + err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"code": response.CodeOK, "success": true,
+			"message": fmt.Sprintf("GitLab 连接成功，最近 7 天获取到 %d 条提交", len(commits))})
+	case "lark", "feishu":
+		// 飞书数据源依赖用户 OAuth 授权，检查是否已授权
+		if _, ok := storeDB.GetToken(userID); !ok {
+			c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false,
+				"message": "飞书未授权，请先完成飞书登录授权"})
+			return
+		}
+		c.JSON(200, gin.H{"code": response.CodeOK, "success": true, "message": "飞书已授权，连接正常"})
+	default:
+		c.JSON(200, gin.H{"code": response.CodeDataSourceTestFail, "success": false,
+			"message": "暂不支持测试该类型数据源: " + ds.Type})
+	}
 }
 
 // ------------------- 模板管理 -------------------
@@ -959,7 +1250,7 @@ func listTemplatesHandler(c *gin.Context) {
 	}
 	templates, err := storeDB.GetTemplates(role)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		response.FailInternal(c, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "data": templates})
@@ -973,7 +1264,7 @@ func createTemplateHandler(c *gin.Context) {
 		Role        string `json:"role"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "请求格式错误"})
+		response.FailParam(c, "请求格式错误")
 		return
 	}
 	template := &model.Template{
@@ -984,7 +1275,7 @@ func createTemplateHandler(c *gin.Context) {
 		Scope:       "personal",
 	}
 	if err := storeDB.SaveTemplate(template); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		response.FailInternal(c, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "message": "模板创建成功"})
@@ -994,12 +1285,12 @@ func getTemplateHandler(c *gin.Context) {
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
-		c.JSON(400, gin.H{"error": "无效的模板 ID"})
+		response.FailParam(c, "无效的模板 ID")
 		return
 	}
 	template, err := storeDB.GetTemplateByID(id)
 	if err != nil {
-		c.JSON(404, gin.H{"error": err.Error()})
+		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "data": template})
@@ -1009,7 +1300,7 @@ func updateTemplateHandler(c *gin.Context) {
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
-		c.JSON(400, gin.H{"error": "无效的模板 ID"})
+		response.FailParam(c, "无效的模板 ID")
 		return
 	}
 	var req struct {
@@ -1019,12 +1310,12 @@ func updateTemplateHandler(c *gin.Context) {
 		Role        string `json:"role"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "请求格式错误"})
+		response.FailParam(c, "请求格式错误")
 		return
 	}
 	template, err := storeDB.GetTemplateByID(id)
 	if err != nil {
-		c.JSON(404, gin.H{"error": err.Error()})
+		response.Fail(c, http.StatusNotFound, response.CodeTemplateNotFound, err.Error())
 		return
 	}
 	template.Name = req.Name
@@ -1032,7 +1323,7 @@ func updateTemplateHandler(c *gin.Context) {
 	template.Content = req.Content
 	template.Role = req.Role
 	if err := storeDB.SaveTemplate(template); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		response.FailInternal(c, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "message": "模板更新成功"})
@@ -1042,89 +1333,29 @@ func deleteTemplateHandler(c *gin.Context) {
 	idStr := c.Param("id")
 	var id uint
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
-		c.JSON(400, gin.H{"error": "无效的模板 ID"})
+		response.FailParam(c, "无效的模板 ID")
 		return
 	}
 	if err := storeDB.DeleteTemplate(id); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		response.FailInternal(c, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"code": 0, "message": "模板删除成功"})
 }
 
 func testRemindHandler(c *gin.Context) {
-	// 模拟发送提醒
-	c.JSON(200, gin.H{"code": 0, "message": "提醒发送成功（模拟）"})
+	if reminderSvc == nil {
+		response.Fail(c, http.StatusInternalServerError, response.CodeRemindFailed, "提醒服务未初始化")
+		return
+	}
+	if err := reminderSvc.SendTestMessage(cfg.Reminder.BotWebhook, cfg.Reminder.BotSecret, ""); err != nil {
+		response.Fail(c, http.StatusInternalServerError, response.CodeRemindFailed, err.Error())
+		return
+	}
+	c.JSON(200, gin.H{"code": 0, "message": "提醒发送成功"})
 }
 
 // ------------------- 辅助函数 -------------------
-
-func generateWeeklyReport(userID, weekStart string, records []model.WorkRecord, tmpl *model.Template) *model.WeeklyReport {
-	var content strings.Builder
-
-	if tmpl != nil && tmpl.Content != "" {
-		// 使用模板引擎（简化版）
-		data := buildTemplateData(userID, weekStart, records)
-		t := template.New("report")
-		t, err := t.Parse(tmpl.Content)
-		if err == nil {
-			var buf bytes.Buffer
-			t.Execute(&buf, data)
-			content.WriteString(buf.String())
-		} else {
-			// 模板解析失败，回退到默认格式
-			content.WriteString(fmt.Sprintf("## 周报 (%s ~ %s)\n\n", weekStart, weekStart))
-			content.WriteString("### 本周工作\n\n")
-			for _, r := range records {
-				content.WriteString(fmt.Sprintf("- %s (%s)\n", r.Title, r.SourceType))
-			}
-		}
-	} else {
-		content.WriteString(fmt.Sprintf("## 周报 (%s ~ %s)\n\n", weekStart, weekStart))
-		content.WriteString("### 本周工作\n\n")
-		for _, r := range records {
-			content.WriteString(fmt.Sprintf("- %s (%s)\n", r.Title, r.SourceType))
-		}
-		content.WriteString("\n### 下周计划\n\n")
-		content.WriteString("- 待补充\n")
-	}
-
-	return &model.WeeklyReport{
-		UserID:    userID,
-		WeekStart: weekStart,
-		WeekEnd:   weekStart,
-		Markdown:  content.String(),
-		Status:    "draft",
-	}
-}
-
-func buildTemplateData(userID, weekStart string, records []model.WorkRecord) map[string]interface{} {
-	var tasks, meetings, docs []map[string]string
-	for _, r := range records {
-		item := map[string]string{
-			"Title":       r.Title,
-			"Description": r.Description,
-			"Source":      r.SourceType,
-			"URL":         r.URL,
-		}
-		switch r.RecordType {
-		case model.TypeMeeting:
-			meetings = append(meetings, item)
-		case model.TypeDoc:
-			docs = append(docs, item)
-		default:
-			tasks = append(tasks, item)
-		}
-	}
-	return map[string]interface{}{
-		"WeekStart": weekStart,
-		"WeekEnd":   weekStart,
-		"Tasks":     tasks,
-		"Meetings":  meetings,
-		"Docs":      docs,
-		"TaskCount": len(tasks),
-	}
-}
 
 func parseTimeOrNow(timeStr string) time.Time {
 	if timeStr == "" {

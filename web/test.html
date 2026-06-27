@@ -125,8 +125,8 @@
 
             <div id="result-area" class="hidden" style="margin-top:20px;">
                 <div class="tabs">
-                    <button class="tab active" onclick="switchTab('preview')">预览</button>
-                    <button class="tab" onclick="switchTab('raw')">原始数据</button>
+                    <button class="tab active" onclick="switchTab('preview', this)">预览</button>
+                    <button class="tab" onclick="switchTab('raw', this)">原始数据</button>
                 </div>
                 <div id="tab-preview">
                     <div id="report-preview" class="report-preview"></div>
@@ -134,12 +134,60 @@
                         <button class="btn btn-secondary" onclick="exportReport('markdown')">📝 导出 Markdown</button>
                         <button class="btn btn-secondary" onclick="exportReport('word')">📄 导出 Word</button>
                         <button class="btn btn-secondary" onclick="exportReport('pdf')">📕 导出 PDF</button>
+                        <button class="btn btn-secondary" onclick="loadVersions()">📜 版本历史</button>
                         <button class="btn btn-success" onclick="submitReport()">✅ 提交周报</button>
+                    </div>
+
+                    <!-- 草稿编辑 -->
+                    <div class="section" style="margin-top:20px;">
+                        <div class="card-title" style="font-size:15px;">✏️ 编辑草稿</div>
+                        <div class="form-group">
+                            <textarea id="edit-markdown" rows="10" placeholder="在此编辑周报 Markdown 草稿..."></textarea>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary" onclick="saveReportEdit()">💾 保存</button>
+                        </div>
+                    </div>
+
+                    <!-- 批注 -->
+                    <div class="section" style="margin-top:20px;">
+                        <div class="card-title" style="font-size:15px;">💬 批注</div>
+                        <div id="comment-list"></div>
+                        <div style="display:flex;gap:10px;margin-top:10px;">
+                            <input type="text" id="comment-input" placeholder="输入批注内容..." style="flex:1;" />
+                            <button class="btn btn-primary" onclick="addComment()">添加</button>
+                        </div>
                     </div>
                 </div>
                 <div id="tab-raw" class="hidden">
                     <pre id="raw-data" style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow:auto;max-height:400px;font-size:12px;"></pre>
                 </div>
+            </div>
+        </div>
+
+        <!-- 本周 vs 上周对比 -->
+        <div class="card">
+            <div class="card-title">📈 本周 vs 上周对比</div>
+            <div class="btn-group">
+                <button class="btn btn-primary" onclick="loadCompare()">🔍 加载对比</button>
+            </div>
+            <div id="compare-result" style="margin-top:12px;"></div>
+        </div>
+
+        <!-- 周报趋势 -->
+        <div class="card">
+            <div class="card-title">📊 周报趋势（近 8 周）</div>
+            <div class="btn-group">
+                <button class="btn btn-primary" onclick="loadStats()">📥 加载趋势</button>
+            </div>
+            <div id="stats-result" style="margin-top:12px;"></div>
+        </div>
+
+        <!-- 管理工具 -->
+        <div class="card">
+            <div class="card-title">🛠️ 管理工具</div>
+            <div class="btn-group">
+                <button class="btn btn-warning" onclick="testRemind()">🔔 测试提醒</button>
             </div>
         </div>
 
@@ -241,13 +289,16 @@
 
     <script>
         // ---------- 工具函数 ----------
+        function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+        // 本地日期格式化（YYYY-MM-DD），避免 toISOString 的 UTC 时区偏移
+        function formatLocalDate(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
         function addLog(msg, type = 'info') {
             const logArea = document.getElementById('log-area');
             const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
             const classMap = { info: 'log-info', success: 'log-success', error: 'log-error', warn: 'log-warn' };
             const line = document.createElement('div');
             line.className = 'log-line';
-            line.innerHTML = `<span class="log-time">[${time}]</span><span class="${classMap[type] || 'log-info'}">${msg}</span>`;
+            line.innerHTML = `<span class="log-time">[${escapeHtml(time)}]</span><span class="${classMap[type] || 'log-info'}">${escapeHtml(msg)}</span>`;
             logArea.appendChild(line);
             logArea.scrollTop = logArea.scrollHeight;
         }
@@ -264,19 +315,21 @@
             if (loading) { btn.disabled = true; btn.dataset.originalText = btn.innerHTML; btn.innerHTML = '<span class="loading"></span> 处理中...'; }
             else { btn.disabled = false; btn.innerHTML = btn.dataset.originalText || btn.innerHTML; }
         }
-        function switchTab(name) {
+        function switchTab(name, el) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            event.target.classList.add('active');
+            if (el) el.classList.add('active');
             document.getElementById('tab-preview').classList.toggle('hidden', name !== 'preview');
             document.getElementById('tab-raw').classList.toggle('hidden', name !== 'raw');
         }
 
         // ---------- 初始化 ----------
         document.addEventListener('DOMContentLoaded', () => {
-            // 默认日期设为本周一
+            // 默认日期设为本周一（本地时区，周日不跳到下周一）
             const d = new Date();
-            d.setDate(d.getDate() - d.getDay() + 1);
-            document.getElementById('week-start').value = d.toISOString().split('T')[0];
+            const day = (d.getDay() + 6) % 7; // 周一=0 ... 周日=6
+            d.setDate(d.getDate() - day);
+            const mon = formatLocalDate(d);
+            document.getElementById('week-start').value = mon;
             initAuth();
             refreshTemplates();
             refreshDataSources();
@@ -391,8 +444,30 @@
             const preview = document.getElementById('report-preview');
             const raw = document.getElementById('raw-data');
             preview.textContent = report.markdown;
+            const edit = document.getElementById('edit-markdown');
+            if (edit) edit.value = report.markdown || '';
             raw.textContent = JSON.stringify(data, null, 2);
             document.getElementById('result-area').classList.remove('hidden');
+            loadComments();
+        }
+        async function saveReportEdit() {
+            const weekStart = document.getElementById('week-start').value;
+            if (!weekStart) { showToast('请先选择日期', 'warn'); return; }
+            const markdown = document.getElementById('edit-markdown').value;
+            try {
+                const res = await fetch(`/api/v1/reports/${weekStart}`, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include', body: JSON.stringify({ markdown })
+                });
+                const data = await res.json();
+                if (data.code === 0) {
+                    showToast('✅ 草稿已保存', 'success');
+                    addLog('草稿已保存并生成新版本', 'success');
+                    document.getElementById('report-preview').textContent = (data.data && data.data.report) ? data.data.report.markdown : markdown;
+                } else {
+                    showToast(data.message || data.error || '保存失败', 'error');
+                }
+            } catch (e) { showToast('保存失败: ' + e.message, 'error'); }
         }
         async function loadReports() {
             try {
@@ -429,6 +504,150 @@
             window.open(`/api/v1/export/${weekStart}?format=${format}`, '_blank');
         }
 
+        // ---------- 对比 ----------
+        async function loadCompare() {
+            const weekStart = document.getElementById('week-start').value;
+            if (!weekStart) { showToast('请先选择日期', 'warn'); return; }
+            const box = document.getElementById('compare-result');
+            try {
+                const res = await fetch(`/api/v1/reports/${weekStart}/compare`, { credentials: 'include' });
+                const data = await res.json();
+                if (data.code !== 0) { showToast(data.error || '加载对比失败', 'error'); return; }
+                const d = data.data;
+                if (!d.has_previous) {
+                    box.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div>暂无上周数据可对比</div>';
+                    addLog('对比：无上周数据', 'info');
+                    return;
+                }
+                const cur = d.current_stats || {}, prev = d.previous_stats || {};
+                const rows = [
+                    ['任务', 'task_count'], ['会议', 'meeting_count'], ['文档', 'doc_count'],
+                    ['提交', 'commit_count'], ['合计', 'total']
+                ].map(([label, key]) => {
+                    const c = cur[key] || 0, p = prev[key] || 0, diff = c - p;
+                    const sign = diff > 0 ? `+${diff}` : `${diff}`;
+                    const cls = diff > 0 ? 'success' : diff < 0 ? 'error' : 'warn';
+                    return `<tr><td style="padding:6px 10px;">${escapeHtml(label)}</td><td style="padding:6px 10px;text-align:center;">${p}</td><td style="padding:6px 10px;text-align:center;">${c}</td><td style="padding:6px 10px;text-align:center;"><span class="tag ${cls}">${escapeHtml(sign)}</span></td></tr>`;
+                }).join('');
+                box.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:14px;">
+                    <thead><tr style="border-bottom:2px solid var(--border);">
+                        <th style="padding:6px 10px;text-align:left;">指标</th>
+                        <th style="padding:6px 10px;">上周</th>
+                        <th style="padding:6px 10px;">本周</th>
+                        <th style="padding:6px 10px;">变化</th>
+                    </tr></thead><tbody>${rows}</tbody></table>`;
+                addLog('✅ 对比数据已加载', 'success');
+            } catch (e) { showToast('加载对比失败: ' + e.message, 'error'); addLog('加载对比失败: ' + e.message, 'error'); }
+        }
+
+        // ---------- 趋势统计 ----------
+        async function loadStats() {
+            const box = document.getElementById('stats-result');
+            try {
+                const res = await fetch('/api/v1/stats', { credentials: 'include' });
+                const data = await res.json();
+                if (data.code !== 0) { showToast(data.error || '加载统计失败', 'error'); return; }
+                const list = data.data || [];
+                if (list.length === 0) {
+                    box.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div>暂无统计数据</div>';
+                    return;
+                }
+                const rows = list.map(s => `<tr style="border-bottom:1px solid var(--border);">
+                    <td style="padding:6px 10px;">${escapeHtml(s.week)}</td>
+                    <td style="padding:6px 10px;text-align:center;">${s.commit_count || 0}</td>
+                    <td style="padding:6px 10px;text-align:center;">${s.task_count || 0}</td>
+                    <td style="padding:6px 10px;text-align:center;">${s.meeting_count || 0}</td>
+                </tr>`).join('');
+                box.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:14px;">
+                    <thead><tr style="border-bottom:2px solid var(--border);">
+                        <th style="padding:6px 10px;text-align:left;">周</th>
+                        <th style="padding:6px 10px;">提交</th>
+                        <th style="padding:6px 10px;">任务</th>
+                        <th style="padding:6px 10px;">会议</th>
+                    </tr></thead><tbody>${rows}</tbody></table>`;
+                addLog(`📊 趋势数据: ${list.length} 周`, 'success');
+            } catch (e) { showToast('加载统计失败: ' + e.message, 'error'); addLog('加载统计失败: ' + e.message, 'error'); }
+        }
+
+        // ---------- 批注 ----------
+        async function loadComments() {
+            const weekStart = document.getElementById('week-start').value;
+            const box = document.getElementById('comment-list');
+            if (!weekStart || !box) return;
+            try {
+                const res = await fetch(`/api/v1/reports/${weekStart}/comments`, { credentials: 'include' });
+                const data = await res.json();
+                if (data.code !== 0) { box.innerHTML = ''; return; }
+                const list = data.data || [];
+                if (list.length === 0) {
+                    box.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">暂无批注</div>';
+                    return;
+                }
+                box.innerHTML = list.map(c => `
+                    <div class="datasource-item">
+                        <div>
+                            <strong>${escapeHtml(c.user_name || c.user_id || '匿名')}</strong>
+                            <span style="color:var(--text-secondary);font-size:12px;margin-left:6px;">${escapeHtml(c.created_at || '')}</span>
+                            <div style="margin-top:4px;">${escapeHtml(c.content)}</div>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-danger" style="padding:4px 10px;font-size:12px;" onclick="deleteComment(${c.id})">删除</button>
+                        </div>
+                    </div>`).join('');
+            } catch (e) { addLog('加载批注失败: ' + e.message, 'error'); }
+        }
+        async function addComment() {
+            const weekStart = document.getElementById('week-start').value;
+            const input = document.getElementById('comment-input');
+            const content = (input.value || '').trim();
+            if (!weekStart) { showToast('请先选择日期', 'warn'); return; }
+            if (!content) { showToast('请输入批注内容', 'warn'); return; }
+            try {
+                const res = await fetch(`/api/v1/reports/${weekStart}/comments`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include', body: JSON.stringify({ content })
+                });
+                const data = await res.json();
+                if (data.code === 0) { showToast('批注已添加', 'success'); addLog('批注已添加', 'success'); input.value = ''; loadComments(); }
+                else { showToast(data.error || '添加失败', 'error'); }
+            } catch (e) { showToast('添加批注失败: ' + e.message, 'error'); }
+        }
+        async function deleteComment(id) {
+            const weekStart = document.getElementById('week-start').value;
+            if (!confirm('确定删除此批注？')) return;
+            try {
+                const res = await fetch(`/api/v1/reports/${weekStart}/comments/${id}`, { method: 'DELETE', credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) { showToast('批注已删除', 'success'); loadComments(); }
+                else { showToast(data.error || '删除失败', 'error'); }
+            } catch (e) { showToast('删除批注失败: ' + e.message, 'error'); }
+        }
+
+        // ---------- 版本历史 ----------
+        async function loadVersions() {
+            const weekStart = document.getElementById('week-start').value;
+            if (!weekStart) { showToast('请先选择日期', 'warn'); return; }
+            try {
+                const res = await fetch(`/api/v1/reports/${weekStart}/versions`, { credentials: 'include' });
+                const data = await res.json();
+                if (data.code !== 0) { showToast(data.error || '加载版本失败', 'error'); return; }
+                const list = data.data || [];
+                addLog(`📜 版本历史: 共 ${list.length} 个版本`, 'info');
+                list.forEach(v => addLog(`  · v${v.version} - ${v.created_at || ''}`, 'info'));
+                showToast(`共 ${list.length} 个版本`, 'success');
+            } catch (e) { showToast('加载版本失败: ' + e.message, 'error'); addLog('加载版本失败: ' + e.message, 'error'); }
+        }
+
+        // ---------- 测试提醒 ----------
+        async function testRemind() {
+            try {
+                const res = await fetch('/api/v1/admin/remind', { method: 'POST', credentials: 'include' });
+                const data = await res.json();
+                if (data.code === 0) { showToast(data.message || '提醒发送成功', 'success'); addLog('🔔 ' + (data.message || '提醒发送成功'), 'success'); }
+                else { showToast(data.error || '提醒发送失败', 'error'); addLog('提醒发送失败: ' + (data.error || ''), 'error'); }
+            } catch (e) { showToast('提醒发送失败: ' + e.message, 'error'); addLog('提醒发送失败: ' + e.message, 'error'); }
+        }
+
         // ---------- 数据源 ----------
         async function refreshDataSources() {
             try {
@@ -439,9 +658,9 @@
                     list.innerHTML = data.data.map(ds => `
                         <div class="datasource-item">
                             <div>
-                                <span class="tag primary">${ds.source}</span>
-                                <strong>${ds.name}</strong>
-                                <span class="tag ${ds.sync_status === 'success' ? 'success' : ds.sync_status === 'failed' ? 'error' : 'warn'}">${ds.sync_status || 'pending'}</span>
+                                <span class="tag primary">${escapeHtml(ds.type)}</span>
+                                <strong>${escapeHtml(ds.name)}</strong>
+                                <span class="tag ${ds.sync_status === 'success' ? 'success' : ds.sync_status === 'failed' ? 'error' : 'warn'}">${escapeHtml(ds.sync_status || 'pending')}</span>
                             </div>
                             <div class="btn-group">
                                 <button class="btn btn-secondary" style="padding:4px 10px;font-size:12px;" onclick="editDataSource(${ds.id})">编辑</button>
@@ -512,14 +731,14 @@
                 select.innerHTML = '<option value="">默认模板</option>';
                 if (data.code === 0 && data.data.length > 0) {
                     data.data.forEach(t => {
-                        select.innerHTML += `<option value="${t.id}">${t.name}</option>`;
+                        select.innerHTML += `<option value="${t.id}">${escapeHtml(t.name)}</option>`;
                     });
                     list.innerHTML = data.data.map(t => `
                         <div class="datasource-item">
                             <div>
-                                <span class="tag ${t.scope === 'global' ? 'success' : 'primary'}">${t.scope || 'personal'}</span>
-                                <strong>${t.name}</strong>
-                                <span class="tag">${t.role || '通用'}</span>
+                                <span class="tag ${t.scope === 'global' ? 'success' : 'primary'}">${escapeHtml(t.scope || 'personal')}</span>
+                                <strong>${escapeHtml(t.name)}</strong>
+                                <span class="tag">${escapeHtml(t.role || '通用')}</span>
                             </div>
                             <div class="btn-group">
                                 <button class="btn btn-secondary" style="padding:4px 10px;font-size:12px;" onclick="editTemplate(${t.id})">编辑</button>

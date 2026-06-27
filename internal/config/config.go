@@ -27,19 +27,19 @@ type Config struct {
 		MaxIdleConns int    `yaml:"max_idle_conns"`
 	} `yaml:"database"`
 	JWT struct {
-		Secret       string `yaml:"secret"`
-		ExpireHours  int    `yaml:"expire_hours"`
+		Secret      string `yaml:"secret"`
+		ExpireHours int    `yaml:"expire_hours"`
 	} `yaml:"jwt"`
 	Log struct {
-		Level      string `yaml:"level"`
-		Output     string `yaml:"output"` // stdout / file
-		FilePath   string `yaml:"file_path"`
+		Level    string `yaml:"level"`
+		Output   string `yaml:"output"` // stdout / file
+		FilePath string `yaml:"file_path"`
 	} `yaml:"log"`
 	Reminder struct {
-		Enabled     bool   `yaml:"enabled"`
-		Cron        string `yaml:"cron"`
-		BotWebhook  string `yaml:"bot_webhook"`
-		BotSecret   string `yaml:"bot_secret"`
+		Enabled    bool   `yaml:"enabled"`
+		Cron       string `yaml:"cron"`
+		BotWebhook string `yaml:"bot_webhook"`
+		BotSecret  string `yaml:"bot_secret"`
 	} `yaml:"reminder"`
 }
 
