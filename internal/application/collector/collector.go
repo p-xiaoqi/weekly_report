@@ -22,13 +22,34 @@ var problemKeywords = []string{
 	"问题", "risk", "风险", "delay", "延期", "卡住", "异常",
 }
 
-// extractProblems 扫描工作记录（提交信息、任务标题/描述），命中关键词的条目
-// 作为候选问题返回，并按标题去重。
+// cleanCommitSubject 从可能多行的 commit message 中提取"标题行"，
+// 过滤掉 Co-Authored-By / Change-Id / Signed-off-by 等 trailer 噪声，让展示更专业。
+func cleanCommitSubject(msg string) string {
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		low := strings.ToLower(line)
+		if strings.HasPrefix(low, "co-authored-by:") ||
+			strings.HasPrefix(low, "change-id:") ||
+			strings.HasPrefix(low, "signed-off-by:") ||
+			strings.HasPrefix(low, "reviewed-by:") {
+			continue
+		}
+		return line
+	}
+	return strings.TrimSpace(msg)
+}
+
+// extractProblems 扫描工作记录（任务标题/描述），命中关键词的条目
+// 作为候选问题返回，并按标题去重。代码提交不计入问题（提交信息常含"修复/fix"等词，
+// 属于正常产出而非阻塞问题）。
 func extractProblems(records []model.WorkRecord) []string {
 	var problems []string
 	seen := make(map[string]bool)
 	for _, rec := range records {
-		if rec.IsHidden {
+		if rec.IsHidden || rec.RecordType == model.TypeCommit {
 			continue
 		}
 		lower := strings.ToLower(rec.Title + " " + rec.Description)
@@ -261,7 +282,7 @@ func (c *Collector) fetchGitLab(ctx context.Context, userID string, weekStart, w
 				SourceType:  "gitlab",
 				ExternalID:  commit.ID,
 				RecordType:  model.TypeCommit,
-				Title:       commit.Message,
+				Title:       cleanCommitSubject(commit.Message),
 				ProjectName: cfg.ProjectPath,
 				OccurredAt:  parseGitTime(commit.CreatedAt),
 			})
@@ -327,7 +348,7 @@ func (c *Collector) fetchGitHub(ctx context.Context, userID string, weekStart, w
 				SourceType:  "github",
 				ExternalID:  commit.SHA,
 				RecordType:  model.TypeCommit,
-				Title:       commit.Commit.Message,
+				Title:       cleanCommitSubject(commit.Commit.Message),
 				ProjectName: fmt.Sprintf("%s/%s", cfg.Owner, cfg.Repo),
 				OccurredAt:  parseGitTime(commit.Commit.Author.Date),
 			})
@@ -407,14 +428,17 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 	if len(commits) > 0 {
 		md += "### 代码提交\n\n"
 		for _, rec := range commits {
-			// 提交信息可能含多行，仅取首行作为标题，避免破坏 Markdown 列表结构。
+			// 标题已在采集时清洗为 commit 首行，这里防御性再取一次首行。
 			title := rec.Title
 			if idx := strings.IndexAny(title, "\r\n"); idx >= 0 {
 				title = title[:idx]
 			}
 			line := fmt.Sprintf("- 💻 %s", title)
 			if rec.ProjectName != "" {
-				line += fmt.Sprintf("（%s）", rec.ProjectName)
+				line += fmt.Sprintf(" @%s", rec.ProjectName)
+			}
+			if !rec.OccurredAt.IsZero() {
+				line += fmt.Sprintf("（%s）", rec.OccurredAt.Format("01-02"))
 			}
 			md += line + "\n"
 		}

@@ -609,7 +609,7 @@ func (s *Store) InitDefaultTemplates() error {
 {{end}}
 {{if .HasCommits}}### 代码提交
 
-{{range .Commits}}- 💻 {{.Title}}{{if .ProjectName}}（{{.ProjectName}}）{{end}}
+{{range .Commits}}- 💻 {{.Title}}{{if .ProjectName}} @{{.ProjectName}}{{end}}{{if .OccurredDate}}（{{.OccurredDate}}）{{end}}
 {{end}}
 {{end}}
 {{if .HasMeetings}}### 会议/日程
@@ -654,7 +654,7 @@ func (s *Store) InitDefaultTemplates() error {
 {{end}}
 {{if .HasCommits}}### 代码提交
 
-{{range .Commits}}- 💻 {{.Title}}{{if .ProjectName}}（{{.ProjectName}}）{{end}}
+{{range .Commits}}- 💻 {{.Title}}{{if .ProjectName}} @{{.ProjectName}}{{end}}{{if .OccurredDate}}（{{.OccurredDate}}）{{end}}
 {{end}}
 {{end}}
 {{if .HasMeetings}}### 会议/日程
