@@ -2,6 +2,7 @@ package reminder
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -18,12 +19,23 @@ import (
 	"weekly-report-system/internal/store"
 )
 
+// AppSender 应用身份发消息接口（由 lark.Client 实现），用于 webhook 之外的
+// "App ID + App Secret" 通知方式。receiveIDType 取 open_id / chat_id 等。
+type AppSender interface {
+	SendMessage(ctx context.Context, receiveIDType, receiveID, text string) error
+}
+
 // ReminderService 定时提醒服务
 type ReminderService struct {
 	cron      *cron.Cron
 	store     *store.Store
 	enabled   bool
-	botSecret string // 飞书自定义机器人“加签”密钥（可选）
+	botSecret string // 飞书自定义机器人"加签"密钥（可选）
+
+	// 应用身份发消息（可选）：配置后优先于 webhook。
+	appSender AppSender
+	useApp    bool
+	chatID    string // 定时提醒目标群；为空则逐一私信未提交用户
 }
 
 // NewReminderService 创建提醒服务
@@ -31,6 +43,18 @@ func NewReminderService(s *store.Store) *ReminderService {
 	return &ReminderService{
 		store: s,
 	}
+}
+
+// SetAppSender 注入应用身份发送器，启用"App ID+Secret"发消息模式。
+func (r *ReminderService) SetAppSender(sender AppSender, useApp bool, chatID string) {
+	r.appSender = sender
+	r.useApp = useApp
+	r.chatID = chatID
+}
+
+// appEnabled 是否走应用身份发消息。
+func (r *ReminderService) appEnabled() bool {
+	return r.useApp && r.appSender != nil
 }
 
 // Start 启动定时任务
@@ -72,16 +96,32 @@ func (r *ReminderService) Start(spec string, botWebhook string, botSecret string
 			if mentionList != "" {
 				mentionList += "、"
 			}
-			mentionList += u
+			mentionList += u.Name
 		}
 
 		content := fmt.Sprintf("⏰ 周报提醒：%d 位成员尚未提交本周周报（%s），请及时提交！", len(unsubmittedUsers), mentionList)
 
-		if botWebhook != "" {
+		switch {
+		case r.appEnabled():
+			if r.chatID != "" {
+				// 发送到指定群
+				if err := r.appSender.SendMessage(context.Background(), "chat_id", r.chatID, content); err != nil {
+					log.Printf("[Reminder] 应用身份发送群消息失败: %v", err)
+				}
+			} else {
+				// 逐一私信未提交用户本人
+				for _, u := range unsubmittedUsers {
+					personal := fmt.Sprintf("⏰ 周报提醒：你本周（%s）的周报尚未提交，请及时提交！", weekStart)
+					if err := r.appSender.SendMessage(context.Background(), "open_id", u.OpenID, personal); err != nil {
+						log.Printf("[Reminder] 应用身份私信 %s 失败: %v", u.Name, err)
+					}
+				}
+			}
+		case botWebhook != "":
 			if err := r.sendBotMessage(botWebhook, r.botSecret, content); err != nil {
 				log.Printf("[Reminder] 发送提醒失败: %v", err)
 			}
-		} else {
+		default:
 			log.Printf("[Reminder] %s", content)
 		}
 	})
@@ -95,8 +135,14 @@ func (r *ReminderService) Start(spec string, botWebhook string, botSecret string
 	log.Printf("[Reminder] 定时提醒服务已启动，规则: %s", spec)
 }
 
+// unsubmittedUser 未提交周报的用户（含 open_id 便于应用身份私信）。
+type unsubmittedUser struct {
+	OpenID string
+	Name   string
+}
+
 // findUnsubmittedUsers 返回本周未提交周报的用户列表
-func (r *ReminderService) findUnsubmittedUsers(weekStart string) ([]string, error) {
+func (r *ReminderService) findUnsubmittedUsers(weekStart string) ([]unsubmittedUser, error) {
 	// 获取所有用户
 	users, err := r.store.ListAllUsers()
 	if err != nil {
@@ -115,14 +161,14 @@ func (r *ReminderService) findUnsubmittedUsers(weekStart string) ([]string, erro
 	}
 
 	// 找出未提交用户
-	var unsubmitted []string
+	var unsubmitted []unsubmittedUser
 	for _, u := range users {
 		if !submittedMap[u.FeishuOpenID] {
 			name := u.Name
 			if name == "" {
 				name = u.FeishuOpenID
 			}
-			unsubmitted = append(unsubmitted, name)
+			unsubmitted = append(unsubmitted, unsubmittedUser{OpenID: u.FeishuOpenID, Name: name})
 		}
 	}
 	return unsubmitted, nil
@@ -146,6 +192,25 @@ func (r *ReminderService) SendTestMessage(webhook, secret, content string) error
 		content = "🧪 这是周报系统的测试消息"
 	}
 	return r.sendBotMessage(webhook, secret, content)
+}
+
+// SendTest 发送测试提醒，自动选择通道：
+//   - 若启用应用身份(App ID/Secret)：有 chatID 则发群，否则私信请求者本人(toOpenID)。
+//   - 否则回退到自定义机器人 webhook。
+func (r *ReminderService) SendTest(ctx context.Context, toOpenID, webhook, secret, content string) error {
+	if content == "" {
+		content = "🧪 这是周报系统的测试消息"
+	}
+	if r.appEnabled() {
+		if r.chatID != "" {
+			return r.appSender.SendMessage(ctx, "chat_id", r.chatID, content)
+		}
+		if toOpenID == "" {
+			return fmt.Errorf("应用身份发送需要接收者 open_id（请重新登录后重试）")
+		}
+		return r.appSender.SendMessage(ctx, "open_id", toOpenID, content)
+	}
+	return r.SendTestMessage(webhook, secret, content)
 }
 
 // genSign 按飞书自定义机器人“加签”算法生成 timestamp 与 sign。

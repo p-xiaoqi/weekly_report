@@ -212,6 +212,8 @@ func main() {
 
 	// 提醒服务
 	reminderSvc = reminder.NewReminderService(storeDB)
+	// 注入应用身份发送器：启用后用 App ID/Secret 经 im API 发消息（替代 webhook）。
+	reminderSvc.SetAppSender(larkClient, cfg.Reminder.UseApp, cfg.Reminder.ChatID)
 	if cfg.Reminder.Enabled {
 		reminderSvc.Start(cfg.Reminder.Cron, cfg.Reminder.BotWebhook, cfg.Reminder.BotSecret)
 	}
@@ -1513,7 +1515,11 @@ func testRemindHandler(c *gin.Context) {
 		response.Fail(c, http.StatusInternalServerError, response.CodeRemindFailed, "提醒服务未初始化")
 		return
 	}
-	if err := reminderSvc.SendTestMessage(cfg.Reminder.BotWebhook, cfg.Reminder.BotSecret, ""); err != nil {
+	// 应用身份模式下默认私信当前登录管理员本人，无需 webhook / open_id 配置。
+	toOpenID, _ := c.Cookie("user_id")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := reminderSvc.SendTest(ctx, toOpenID, cfg.Reminder.BotWebhook, cfg.Reminder.BotSecret, ""); err != nil {
 		response.Fail(c, http.StatusInternalServerError, response.CodeRemindFailed, err.Error())
 		return
 	}

@@ -40,6 +40,10 @@ type Config struct {
 		Cron       string `yaml:"cron"`
 		BotWebhook string `yaml:"bot_webhook"`
 		BotSecret  string `yaml:"bot_secret"`
+		// UseApp=true 时改用应用身份(App ID/Secret)通过 im API 发消息，而非 webhook。
+		UseApp bool `yaml:"use_app"`
+		// ChatID 为定时提醒要发送到的群（chat_id）；为空时定时提醒发送到各未提交用户本人。
+		ChatID string `yaml:"chat_id"`
 	} `yaml:"reminder"`
 	// Admin 管理员白名单（用于 /api/v1/admin/* 接口的鉴权）。
 	// 与"飞书群管理员"无关：此处指本系统自己的管理员授权名单。
@@ -106,6 +110,7 @@ func Load() (*Config, error) {
 	cfg.JWT.Secret = resolveEnv(cfg.JWT.Secret)
 	cfg.Reminder.BotWebhook = resolveEnv(cfg.Reminder.BotWebhook)
 	cfg.Reminder.BotSecret = resolveEnv(cfg.Reminder.BotSecret)
+	cfg.Reminder.ChatID = resolveEnv(cfg.Reminder.ChatID)
 	cfg.Admin.Emails = resolveEnv(cfg.Admin.Emails)
 	cfg.Admin.OpenIDs = resolveEnv(cfg.Admin.OpenIDs)
 	// 环境变量直接提供时优先覆盖（兼容未在 yaml 中使用 ${...} 占位的情况）
@@ -128,6 +133,15 @@ func Load() (*Config, error) {
 			cfg.Reminder.BotSecret = v
 		} else if v := os.Getenv("FEISHU_BOT_SECRET"); v != "" {
 			cfg.Reminder.BotSecret = v
+		}
+	}
+	// 应用身份发消息模式的环境变量兜底
+	if v := os.Getenv("REMINDER_USE_APP"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.Reminder.UseApp = true
+	}
+	if cfg.Reminder.ChatID == "" {
+		if v := os.Getenv("REMINDER_CHAT_ID"); v != "" {
+			cfg.Reminder.ChatID = v
 		}
 	}
 

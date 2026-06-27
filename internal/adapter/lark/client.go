@@ -30,6 +30,64 @@ func NewClient(appID, appSecret string) *Client {
 	}
 }
 
+// SendMessage 使用应用身份（tenant_access_token）通过 im/v1/messages 发送文本消息。
+// receiveIDType 取值：open_id / user_id / union_id / email / chat_id。
+// 这是 webhook 自定义机器人之外的另一种通知方式，靠 App ID + App Secret 鉴权，
+// 无需"加签"，且可定向发给指定用户或群。
+func (c *Client) SendMessage(ctx context.Context, receiveIDType, receiveID, text string) error {
+	token, err := c.getTenantToken(ctx)
+	if err != nil {
+		return fmt.Errorf("获取 tenant_access_token 失败（请检查 FEISHU_APP_ID/FEISHU_APP_SECRET）: %w", err)
+	}
+
+	// content 字段要求是 JSON 字符串
+	contentBytes, _ := json.Marshal(map[string]string{"text": text})
+	reqBody := map[string]string{
+		"receive_id": receiveID,
+		"msg_type":   "text",
+		"content":    string(contentBytes),
+	}
+	data, _ := json.Marshal(reqBody)
+
+	url := "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=" + receiveIDType
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("飞书发送消息响应无法解析(HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	if result.Code != 0 {
+		hint := ""
+		switch result.Code {
+		case 99991663, 99991661, 99991664:
+			hint = "（tenant_access_token 无效/过期，请检查 App ID/Secret）"
+		case 230002, 230013:
+			hint = "（接收方 open_id 与本应用不匹配，open_id 按应用隔离，请用本应用 /api/v1/auth/status 返回的 user_id）"
+		case 9499:
+			hint = "（缺少权限，请在开放平台为应用开通 im:message 发送消息权限并发布版本）"
+		case 230001:
+			hint = "（接收方未与机器人建立会话或机器人不可用，请确认应用已发布且接收人可用该应用）"
+		}
+		return fmt.Errorf("飞书发送消息失败 code=%d msg=%s%s", result.Code, result.Msg, hint)
+	}
+	return nil
+}
+
 func (c *Client) getTenantToken(ctx context.Context) (string, error) {
 	c.mu.RLock()
 	if c.tenantToken != "" && time.Now().Before(c.tokenExpire.Add(-5*time.Minute)) {
