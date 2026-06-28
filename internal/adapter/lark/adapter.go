@@ -56,7 +56,11 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 	}
 
 	var records []model.WorkRecord
+	var pendingTasks []model.WorkRecord // 未完成任务，用于"下周计划"
 	var errs []string
+
+	nextWeekStart := req.WeekStart.AddDate(0, 0, 7)
+	nextWeekEnd := req.WeekEnd.AddDate(0, 0, 7)
 
 	tasks, err := a.client.FetchUserTasks(ctx, token)
 	if err != nil {
@@ -66,25 +70,49 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 		log.Printf("[DEBUG] 获取到 %d 条任务", len(tasks))
 		for _, task := range tasks {
 			// 飞书任务状态字段是 status: "done" / "todo"
-			if task.Status != "done" {
+			if task.Status == "done" {
+				// 优先使用 completed_at（飞书实际返回的字段）
+				completedTimeStr := task.CompletedAt
+				if completedTimeStr == "" {
+					completedTimeStr = task.CompletedTime
+				}
+				completedTime := parseTimestampOrRFC3339(completedTimeStr)
+				if completedTime.IsZero() {
+					log.Printf("[WARN] 任务 completed_at 解析失败: %s", completedTimeStr)
+					continue
+				}
+				// 只保留本周内完成的任务
+				if completedTime.Before(req.WeekStart) || completedTime.After(req.WeekEnd) {
+					continue
+				}
+				log.Printf("[DEBUG] 已完成任务: %s, completed_at=%s", task.Summary, completedTime.Format("2006-01-02 15:04"))
+				records = append(records, model.WorkRecord{
+					UserID:      req.UserID,
+					SourceType:  "lark",
+					ExternalID:  task.GUID,
+					RecordType:  model.TypeTask,
+					Title:       task.Summary,
+					Description: task.Notes,
+					ProjectName: task.TopicName,
+					OccurredAt:  completedTime,
+				})
 				continue
 			}
-			// 优先使用 completed_at（飞书实际返回的字段）
-			completedTimeStr := task.CompletedAt
-			if completedTimeStr == "" {
-				completedTimeStr = task.CompletedTime
+
+			// 未完成任务 → 候选"下周计划"
+			dueTime := parseTimestampOrRFC3339(task.DueTime)
+			// 选取规则：
+			//   1) 有 due_time 且落在下周区间 → 必选
+			//   2) 有 due_time 但已过期（< 本周开始） → 跳过（视为遗留）
+			//   3) 有 due_time 在本周内 → 跳过（属于本周应完成而未完成，不算下周计划）
+			//   4) 无 due_time → 仍纳入下周计划，方便用户补充安排
+			if !dueTime.IsZero() {
+				if dueTime.Before(nextWeekStart) || dueTime.After(nextWeekEnd) {
+					continue
+				}
 			}
-			completedTime := parseTimestampOrRFC3339(completedTimeStr)
-			if completedTime.IsZero() {
-				log.Printf("[WARN] 任务 completed_at 解析失败: %s", completedTimeStr)
-				continue
-			}
-			// 只保留本周内完成的任务
-			if completedTime.Before(req.WeekStart) || completedTime.After(req.WeekEnd) {
-				continue
-			}
-			log.Printf("[DEBUG] 任务: %s, completed_at=%s", task.Summary, completedTime.Format("2006-01-02 15:04"))
-			records = append(records, model.WorkRecord{
+			log.Printf("[DEBUG] 未完成任务纳入下周计划: %s, due_time=%s", task.Summary, task.DueTime)
+			pendingTasks = append(pendingTasks, model.WorkRecord{
 				UserID:      req.UserID,
 				SourceType:  "lark",
 				ExternalID:  task.GUID,
@@ -92,7 +120,7 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 				Title:       task.Summary,
 				Description: task.Notes,
 				ProjectName: task.TopicName,
-				OccurredAt:  completedTime,
+				OccurredAt:  dueTime,
 			})
 		}
 	}
@@ -157,9 +185,9 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 	}
 
 	// 查询下周日程用于下周计划
-	nextWeekStart := req.WeekStart.AddDate(0, 0, 7)
-	nextWeekEnd := req.WeekEnd.AddDate(0, 0, 7)
 	var nextWeekEvents []model.WorkRecord
+	// 先把未完成任务作为下周计划的一部分
+	nextWeekEvents = append(nextWeekEvents, pendingTasks...)
 	nextEvents, err := a.client.FetchUserCalendarEvents(ctx, token, nextWeekStart, nextWeekEnd)
 	if err != nil {
 		log.Printf("[WARN] 获取下周日程失败: %v", err)

@@ -633,7 +633,7 @@ func (s *Store) InitDefaultTemplates() error {
 {{end}}
 ## 下周计划
 
-{{if .HasNextWeek}}{{range .NextWeekEvents}}- [ ] {{.Title}} ({{.OccurredDate}})
+{{if .HasNextWeek}}{{range .NextWeekEvents}}- [ ] {{.Title}}{{if .OccurredDate}} ({{.OccurredDate}}){{end}}
 {{if .ProjectName}}  - 📍 地点：{{.ProjectName}}
 {{end}}{{end}}{{else}}- 待补充
 {{end}}`,

@@ -483,7 +483,17 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 	md += "\n## 下周计划\n\n"
 	if len(nextWeekEvents) > 0 {
 		for _, rec := range nextWeekEvents {
-			md += fmt.Sprintf("- [ ] %s (%s)\n", rec.Title, rec.OccurredAt.Format("01-02 15:04"))
+			icon := "📌"
+			if rec.RecordType == model.TypeMeeting {
+				icon = "📅"
+			} else if rec.RecordType == model.TypeTask {
+				icon = "📋"
+			}
+			line := fmt.Sprintf("- [ ] %s %s", icon, rec.Title)
+			if !rec.OccurredAt.IsZero() {
+				line += fmt.Sprintf(" (%s)", rec.OccurredAt.Format("01-02 15:04"))
+			}
+			md += line + "\n"
 			if rec.ProjectName != "" {
 				md += fmt.Sprintf("  - 📍 地点：%s\n", rec.ProjectName)
 			}
@@ -528,14 +538,19 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 
 	var nextItems []model.TemplateItem
 	for _, rec := range nextWeek {
-		nextItems = append(nextItems, model.TemplateItem{
-			Title:        rec.Title,
-			Description:  rec.Description,
-			ProjectName:  rec.ProjectName,
-			URL:          rec.URL,
-			OccurredAt:   rec.OccurredAt,
-			OccurredDate: rec.OccurredAt.Format("01-02 15:04"),
-		})
+		item := model.TemplateItem{
+			Title:       rec.Title,
+			Description: rec.Description,
+			ProjectName: rec.ProjectName,
+			URL:         rec.URL,
+			OccurredAt:  rec.OccurredAt,
+		}
+		if !rec.OccurredAt.IsZero() {
+			item.OccurredDate = rec.OccurredAt.Format("01-02 15:04")
+		}
+		// 通过 ProjectName 占位记录类型标签，便于模板/前端区分任务与日程
+		// （保持向后兼容：模板里依然可用 .ProjectName）
+		nextItems = append(nextItems, item)
 	}
 
 	problems := extractProblems(records)
