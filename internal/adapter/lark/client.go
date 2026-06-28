@@ -532,7 +532,7 @@ func BuildReminderCard(title, content, buttonText, url string) map[string]interf
 
 }
 
-// CreateDocWithText 用应用身份创建一篇飞书云文档，并写入一段纯文本（markdown 原文）。
+// CreateDocWithText 用应用身份创建一篇飞书云文档，并把 markdown 转成多种 docx 块写入。
 // 创建失败返回错误；写入正文失败时仍返回文档链接（best-effort）。
 func (c *Client) CreateDocWithText(ctx context.Context, title, markdown string) (docURL string, err error) {
 	token, err := c.getTenantToken(ctx)
@@ -573,34 +573,136 @@ func (c *Client) CreateDocWithText(ctx context.Context, title, markdown string) 
 	documentID := createResult.Data.Document.DocumentID
 	docURL = "https://feishu.cn/docx/" + documentID
 
-	// 2) 追加一个文本块（block_type=2），失败时仍返回文档链接
-	childBody, _ := json.Marshal(map[string]interface{}{
-		"children": []interface{}{
-			map[string]interface{}{
-				"block_type": 2,
-				"text": map[string]interface{}{
-					"elements": []interface{}{
-						map[string]interface{}{
-							"text_run": map[string]interface{}{"content": markdown},
-						},
-					},
-				},
-			},
-		},
-	})
+	// 2) markdown 转 docx 块并分批插入（每批 <=50），失败仅记录日志、仍返回链接
+	blocks := markdownToDocxBlocks(markdown)
 	childURL := fmt.Sprintf("https://open.feishu.cn/open-apis/docx/v1/documents/%s/blocks/%s/children", documentID, documentID)
-	creq, err := http.NewRequestWithContext(ctx, "POST", childURL, bytes.NewReader(childBody))
-	if err != nil {
-		return docURL, nil
+	index := 0
+	for start := 0; start < len(blocks); start += 50 {
+		end := start + 50
+		if end > len(blocks) {
+			end = len(blocks)
+		}
+		batch := blocks[start:end]
+		childBody, _ := json.Marshal(map[string]interface{}{"index": index, "children": batch})
+		creq, cerr := http.NewRequestWithContext(ctx, "POST", childURL, bytes.NewReader(childBody))
+		if cerr != nil {
+			log.Printf("[WARN] 构造飞书文档块请求失败: %v", cerr)
+			break
+		}
+		creq.Header.Set("Content-Type", "application/json; charset=utf-8")
+		creq.Header.Set("Authorization", "Bearer "+token)
+		cresp, cerr := c.httpClient.Do(creq)
+		if cerr != nil {
+			log.Printf("[WARN] 写入飞书文档块失败: %v", cerr)
+			break
+		}
+		cbody, _ := io.ReadAll(cresp.Body)
+		cresp.Body.Close()
+		var cres struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+		}
+		if jerr := json.Unmarshal(cbody, &cres); jerr != nil || cres.Code != 0 {
+			log.Printf("[WARN] 写入飞书文档块失败 code=%d msg=%s body=%s", cres.Code, cres.Msg, string(cbody))
+			break
+		}
+		index += len(batch)
 	}
-	creq.Header.Set("Content-Type", "application/json; charset=utf-8")
-	creq.Header.Set("Authorization", "Bearer "+token)
-	cresp, err := c.httpClient.Do(creq)
-	if err != nil {
-		return docURL, nil
-	}
-	cresp.Body.Close()
 	return docURL, nil
+}
+
+// markdownToDocxBlocks 把 markdown 逐行转换为 docx 块（标题/待办/列表/引用/段落）。
+func markdownToDocxBlocks(md string) []map[string]interface{} {
+	var blocks []map[string]interface{}
+	for _, line := range strings.Split(md, "\n") {
+		trimmed := strings.TrimRight(line, "\r")
+		if strings.TrimSpace(trimmed) == "" {
+			continue // 跳过空行
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "#### "):
+			blocks = append(blocks, textBlock(6, "heading4", mdInlineToElements(trimmed[5:]), nil))
+		case strings.HasPrefix(trimmed, "### "):
+			blocks = append(blocks, textBlock(5, "heading3", mdInlineToElements(trimmed[4:]), nil))
+		case strings.HasPrefix(trimmed, "## "):
+			blocks = append(blocks, textBlock(4, "heading2", mdInlineToElements(trimmed[3:]), nil))
+		case strings.HasPrefix(trimmed, "# "):
+			blocks = append(blocks, textBlock(3, "heading1", mdInlineToElements(trimmed[2:]), nil))
+		case strings.HasPrefix(trimmed, "- [ ] "):
+			blocks = append(blocks, textBlock(17, "todo", mdInlineToElements(trimmed[6:]), map[string]interface{}{"done": false}))
+		case strings.HasPrefix(trimmed, "- [x] "), strings.HasPrefix(trimmed, "- [X] "):
+			blocks = append(blocks, textBlock(17, "todo", mdInlineToElements(trimmed[6:]), map[string]interface{}{"done": true}))
+		case strings.HasPrefix(trimmed, "- "):
+			blocks = append(blocks, textBlock(12, "bullet", mdInlineToElements(trimmed[2:]), nil))
+		case strings.HasPrefix(trimmed, "* "):
+			blocks = append(blocks, textBlock(12, "bullet", mdInlineToElements(trimmed[2:]), nil))
+		case strings.HasPrefix(trimmed, "> "):
+			blocks = append(blocks, textBlock(2, "text", mdInlineToElements("▎ "+trimmed[2:]), nil))
+		default:
+			blocks = append(blocks, textBlock(2, "text", mdInlineToElements(trimmed), nil))
+		}
+	}
+	return blocks
+}
+
+// textBlock 构造一个 docx 块：block_type + 字段键（heading/todo/bullet/text 等）。
+func textBlock(blockType int, key string, elements []map[string]interface{}, extraStyle map[string]interface{}) map[string]interface{} {
+	style := map[string]interface{}{}
+	for k, v := range extraStyle {
+		style[k] = v
+	}
+	return map[string]interface{}{
+		"block_type": blockType,
+		key: map[string]interface{}{
+			"elements": elements,
+			"style":    style,
+		},
+	}
+}
+
+// mdInlineToElements 解析行内 markdown：链接 [label](url) 与加粗 **x**，其余作为纯文本。
+func mdInlineToElements(s string) []map[string]interface{} {
+	var elements []map[string]interface{}
+	for len(s) > 0 {
+		// 链接 [label](url)
+		if lb := strings.Index(s, "["); lb >= 0 {
+			if rb := strings.Index(s[lb:], "]("); rb >= 0 {
+				rb += lb
+				if rp := strings.Index(s[rb:], ")"); rp >= 0 {
+					rp += rb
+					if lb > 0 {
+						elements = append(elements, plainElements(s[:lb])...)
+					}
+					label := s[lb+1 : rb]
+					rawURL := s[rb+2 : rp]
+					elements = append(elements, map[string]interface{}{
+						"text_run": map[string]interface{}{
+							"content":            label,
+							"text_element_style": map[string]interface{}{"link": map[string]interface{}{"url": url.QueryEscape(rawURL)}},
+						},
+					})
+					s = s[rp+1:]
+					continue
+				}
+			}
+		}
+		// 无更多链接：处理剩余文本（去除加粗标记）
+		elements = append(elements, plainElements(s)...)
+		break
+	}
+	if len(elements) == 0 {
+		elements = append(elements, map[string]interface{}{"text_run": map[string]interface{}{"content": ""}})
+	}
+	return elements
+}
+
+// plainElements 去掉加粗标记并生成纯文本 text_run 元素。
+func plainElements(s string) []map[string]interface{} {
+	s = strings.ReplaceAll(s, "**", "")
+	if s == "" {
+		return nil
+	}
+	return []map[string]interface{}{{"text_run": map[string]interface{}{"content": s}}}
 }
 
 func (c *Client) FetchUserTasks(ctx context.Context, userAccessToken string) ([]Task, error) {

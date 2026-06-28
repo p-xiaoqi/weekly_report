@@ -232,8 +232,8 @@ func main() {
 	reminderSvc = reminder.NewReminderService(storeDB)
 	// 注入应用身份发送器：启用后用 App ID/Secret 经 im API 发消息（替代 webhook）。
 	reminderSvc.SetAppSender(larkClient, cfg.Reminder.UseApp, cfg.Reminder.ChatID)
-	// 设置卡片"立即填写"按钮跳转地址，启用交互卡片提醒
-	reminderSvc.SetCardURL(cfg.Server.BaseURL + "/test.html")
+	// 设置卡片按钮跳转的服务基础地址，启用交互卡片提醒（按钮经埋点接口再落地）
+	reminderSvc.SetCardURL(cfg.Server.BaseURL)
 	if cfg.Reminder.Enabled {
 		reminderSvc.Start(cfg.Reminder.Cron, cfg.Reminder.BotWebhook, cfg.Reminder.BotSecret)
 	}
@@ -290,6 +290,9 @@ func main() {
 	r.GET("/api/v1/auth/lark/login", larkLoginHandler)
 	r.GET("/api/v1/auth/lark/callback", larkCallbackHandler)
 	r.POST("/api/v1/auth/logout", logoutHandler)
+
+	// 提醒卡片"立即填写"按钮点击埋点（无需登录，点击后重定向到应用页）
+	r.GET("/api/v1/track/reminder-click", trackReminderClickHandler)
 
 	// 需要登录的 API
 	authorized := r.Group("/")
@@ -376,7 +379,7 @@ func main() {
 			}
 			cfg = newCfg
 			reminderSvc.SetAppSender(larkClient, cfg.Reminder.UseApp, cfg.Reminder.ChatID)
-			reminderSvc.SetCardURL(cfg.Server.BaseURL + "/test.html")
+			reminderSvc.SetCardURL(cfg.Server.BaseURL)
 			log.Println("[hot-reload] 配置已重新加载")
 		}
 	}()
@@ -522,6 +525,15 @@ func logoutHandler(c *gin.Context) {
 	c.SetCookie("user_id", "", -1, "/", "", false, false)
 	c.SetCookie("token", "", -1, "/", "", false, true)
 	c.JSON(200, gin.H{"code": 0, "message": "已退出登录"})
+}
+
+// trackReminderClickHandler 记录提醒卡片按钮点击埋点后重定向到应用页。
+func trackReminderClickHandler(c *gin.Context) {
+	uid := c.Query("uid")
+	week := c.Query("week")
+	src := c.Query("src")
+	storeDB.LogAudit(uid, "reminder_click", "reminder", week, fmt.Sprintf("来源=%s", src), c.ClientIP())
+	c.Redirect(http.StatusFound, "/test.html")
 }
 
 func collectHandler(c *gin.Context) {
