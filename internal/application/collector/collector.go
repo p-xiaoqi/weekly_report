@@ -537,21 +537,39 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 
 	md += "\n## 下周计划\n\n"
 	if len(nextWeekEvents) > 0 {
+		// 按类型拆分：任务 / 日程，分别列出
+		var nextTasks, nextMeetings []model.WorkRecord
 		for _, rec := range nextWeekEvents {
-			icon := "📌"
 			if rec.RecordType == model.TypeMeeting {
-				icon = "📅"
-			} else if rec.RecordType == model.TypeTask {
-				icon = "📋"
+				nextMeetings = append(nextMeetings, rec)
+			} else {
+				nextTasks = append(nextTasks, rec)
 			}
-			line := fmt.Sprintf("- [ ] %s %s", icon, mdLink(rec.Title, rec.URL))
-			if !rec.OccurredAt.IsZero() {
-				line += fmt.Sprintf(" (%s)", rec.OccurredAt.Format("01-02 15:04"))
+		}
+		if len(nextTasks) > 0 {
+			md += "### 待办任务\n\n"
+			for _, rec := range nextTasks {
+				line := fmt.Sprintf("- [ ] 📋 %s", mdLink(rec.Title, rec.URL))
+				if !rec.OccurredAt.IsZero() {
+					line += fmt.Sprintf("（截止 %s）", rec.OccurredAt.Format("01-02 15:04"))
+				}
+				md += line + "\n"
 			}
-			md += line + "\n"
-			if rec.ProjectName != "" {
-				md += fmt.Sprintf("  - 📍 地点：%s\n", rec.ProjectName)
+			md += "\n"
+		}
+		if len(nextMeetings) > 0 {
+			md += "### 日程安排\n\n"
+			for _, rec := range nextMeetings {
+				line := fmt.Sprintf("- [ ] 📅 %s", mdLink(rec.Title, rec.URL))
+				if !rec.OccurredAt.IsZero() {
+					line += fmt.Sprintf("（%s）", rec.OccurredAt.Format("01-02 15:04"))
+				}
+				md += line + "\n"
+				if rec.ProjectName != "" {
+					md += fmt.Sprintf("  - 📍 地点：%s\n", rec.ProjectName)
+				}
 			}
+			md += "\n"
 		}
 	} else {
 		md += "- 待补充\n"
@@ -599,6 +617,8 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 	}
 
 	var nextItems []model.TemplateItem
+	var nextTasks []model.TemplateItem
+	var nextMeetings []model.TemplateItem
 	for _, rec := range nextWeek {
 		item := model.TemplateItem{
 			Title:       rec.Title,
@@ -610,35 +630,44 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 		if !rec.OccurredAt.IsZero() {
 			item.OccurredDate = rec.OccurredAt.Format("01-02 15:04")
 		}
-		// 通过 ProjectName 占位记录类型标签，便于模板/前端区分任务与日程
-		// （保持向后兼容：模板里依然可用 .ProjectName）
 		nextItems = append(nextItems, item)
+		// 按记录类型拆分，便于模板分别列出"任务"与"日程"
+		switch rec.RecordType {
+		case model.TypeMeeting:
+			nextMeetings = append(nextMeetings, item)
+		default:
+			nextTasks = append(nextTasks, item)
+		}
 	}
 
 	problems := extractProblems(records)
 
 	return model.ReportTemplateData{
-		WeekStart:       report.WeekStart,
-		WeekEnd:         report.WeekEnd,
-		WeekRange:       report.WeekStart + " ~ " + report.WeekEnd,
-		Tasks:           tasks,
-		Commits:         commits,
-		Meetings:        meetings,
-		Docs:            docs,
-		NextWeekEvents:  nextItems,
-		Problems:        problems,
-		TaskCount:       len(tasks),
-		CommitCount:     len(commits),
-		MeetingCount:    len(meetings),
-		DocCount:        len(docs),
-		NextWeekCount:   len(nextItems),
-		CommitAdditions: totalAdd,
-		CommitDeletions: totalDel,
-		HasTasks:        len(tasks) > 0,
-		HasCommits:      len(commits) > 0,
-		HasMeetings:     len(meetings) > 0,
-		HasDocs:         len(docs) > 0,
-		HasNextWeek:     len(nextItems) > 0,
-		HasProblems:     len(problems) > 0,
+		WeekStart:           report.WeekStart,
+		WeekEnd:             report.WeekEnd,
+		WeekRange:           report.WeekStart + " ~ " + report.WeekEnd,
+		Tasks:               tasks,
+		Commits:             commits,
+		Meetings:            meetings,
+		Docs:                docs,
+		NextWeekEvents:      nextItems,
+		NextWeekTasks:       nextTasks,
+		NextWeekMeetings:    nextMeetings,
+		Problems:            problems,
+		TaskCount:           len(tasks),
+		CommitCount:         len(commits),
+		MeetingCount:        len(meetings),
+		DocCount:            len(docs),
+		NextWeekCount:       len(nextItems),
+		CommitAdditions:     totalAdd,
+		CommitDeletions:     totalDel,
+		HasTasks:            len(tasks) > 0,
+		HasCommits:          len(commits) > 0,
+		HasMeetings:         len(meetings) > 0,
+		HasDocs:             len(docs) > 0,
+		HasNextWeek:         len(nextItems) > 0,
+		HasNextWeekTasks:    len(nextTasks) > 0,
+		HasNextWeekMeetings: len(nextMeetings) > 0,
+		HasProblems:         len(problems) > 0,
 	}
 }

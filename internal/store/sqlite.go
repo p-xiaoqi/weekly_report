@@ -682,9 +682,16 @@ func (s *Store) InitDefaultTemplates() error {
 {{end}}
 ## 下周计划
 
-{{if .HasNextWeek}}{{range .NextWeekEvents}}- [ ] {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}{{if .OccurredDate}} ({{.OccurredDate}}){{end}}
+{{if .HasNextWeekTasks}}### 待办任务
+
+{{range .NextWeekTasks}}- [ ] 📋 {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}{{if .OccurredDate}}（截止 {{.OccurredDate}}）{{end}}
+{{end}}
+{{end}}{{if .HasNextWeekMeetings}}### 日程安排
+
+{{range .NextWeekMeetings}}- [ ] 📅 {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}{{if .OccurredDate}}（{{.OccurredDate}}）{{end}}
 {{if .ProjectName}}  - 📍 地点：{{.ProjectName}}
-{{end}}{{end}}{{else}}- 待补充
+{{end}}{{end}}
+{{end}}{{if not .HasNextWeek}}- 待补充
 {{end}}`,
 		},
 		{
@@ -726,7 +733,17 @@ func (s *Store) InitDefaultTemplates() error {
 {{end}}
 ## 下周计划
 
-- 待补充`,
+{{if .HasNextWeekTasks}}### 待办任务
+
+{{range .NextWeekTasks}}- [ ] 📋 {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}{{if .OccurredDate}}（截止 {{.OccurredDate}}）{{end}}
+{{end}}
+{{end}}{{if .HasNextWeekMeetings}}### 日程安排
+
+{{range .NextWeekMeetings}}- [ ] 📅 {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}{{if .OccurredDate}}（{{.OccurredDate}}）{{end}}
+{{if .ProjectName}}  - 📍 地点：{{.ProjectName}}
+{{end}}{{end}}
+{{end}}{{if not .HasNextWeek}}- 待补充
+{{end}}`,
 		},
 	}
 

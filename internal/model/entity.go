@@ -33,28 +33,33 @@ type TemplateItem struct {
 
 // ReportTemplateData 传递给模板引擎的数据结构
 type ReportTemplateData struct {
-	WeekStart       string
-	WeekEnd         string
-	WeekRange       string
-	Tasks           []TemplateItem
-	Commits         []TemplateItem
-	Meetings        []TemplateItem
-	Docs            []TemplateItem
-	NextWeekEvents  []TemplateItem
-	Problems        []string // 自动识别到的问题/阻塞项
-	TaskCount       int
-	CommitCount     int
-	MeetingCount    int
-	DocCount        int
-	NextWeekCount   int
-	CommitAdditions int // 本周代码新增行数合计
-	CommitDeletions int // 本周代码删除行数合计
-	HasTasks        bool
-	HasCommits      bool
-	HasMeetings     bool
-	HasDocs         bool
-	HasNextWeek     bool
-	HasProblems     bool
+	WeekStart      string
+	WeekEnd        string
+	WeekRange      string
+	Tasks          []TemplateItem
+	Commits        []TemplateItem
+	Meetings       []TemplateItem
+	Docs           []TemplateItem
+	NextWeekEvents []TemplateItem
+	// 下周计划按类型拆分，便于模板分别列出"任务"与"日程"
+	NextWeekTasks       []TemplateItem
+	NextWeekMeetings    []TemplateItem
+	Problems            []string // 自动识别到的问题/阻塞项
+	TaskCount           int
+	CommitCount         int
+	MeetingCount        int
+	DocCount            int
+	NextWeekCount       int
+	CommitAdditions     int // 本周代码新增行数合计
+	CommitDeletions     int // 本周代码删除行数合计
+	HasTasks            bool
+	HasCommits          bool
+	HasMeetings         bool
+	HasDocs             bool
+	HasNextWeek         bool
+	HasNextWeekTasks    bool
+	HasNextWeekMeetings bool
+	HasProblems         bool
 }
 
 // User 用户表（飞书登录后自动创建）
