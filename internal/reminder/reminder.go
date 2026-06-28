@@ -24,6 +24,7 @@ import (
 // "App ID + App Secret" 通知方式。receiveIDType 取 open_id / chat_id 等。
 type AppSender interface {
 	SendMessage(ctx context.Context, receiveIDType, receiveID, text string) error
+	SendCard(ctx context.Context, receiveIDType, receiveID string, card interface{}) error
 }
 
 // ReminderService 定时提醒服务
@@ -37,6 +38,7 @@ type ReminderService struct {
 	appSender AppSender
 	useApp    bool
 	chatIDs   []string // 定时提醒目标群（可多个）；为空则逐一私信未提交用户
+	cardURL   string   // 卡片"立即填写"按钮跳转地址；为空时降级为纯文本消息
 }
 
 // NewReminderService 创建提醒服务
@@ -52,6 +54,42 @@ func (r *ReminderService) SetAppSender(sender AppSender, useApp bool, chatIDs st
 	r.appSender = sender
 	r.useApp = useApp
 	r.chatIDs = splitCSV(chatIDs)
+}
+
+// SetCardURL 设置卡片"立即填写"按钮跳转地址；非空时定时/测试提醒改用交互卡片。
+func (r *ReminderService) SetCardURL(url string) {
+	r.cardURL = url
+}
+
+// buildCard 构造"周报提醒"交互卡片（与 lark.BuildReminderCard 等价，内置以避免 import 环）。
+func buildCard(title, content, url string) map[string]interface{} {
+	elements := []interface{}{
+		map[string]interface{}{
+			"tag":  "div",
+			"text": map[string]interface{}{"tag": "lark_md", "content": content},
+		},
+	}
+	if url != "" {
+		elements = append(elements, map[string]interface{}{
+			"tag": "action",
+			"actions": []interface{}{
+				map[string]interface{}{
+					"tag":  "button",
+					"text": map[string]interface{}{"tag": "plain_text", "content": "立即填写"},
+					"type": "primary",
+					"url":  url,
+				},
+			},
+		})
+	}
+	return map[string]interface{}{
+		"config": map[string]interface{}{"wide_screen_mode": true},
+		"header": map[string]interface{}{
+			"template": "orange",
+			"title":    map[string]interface{}{"tag": "plain_text", "content": title},
+		},
+		"elements": elements,
+	}
 }
 
 // splitCSV 把逗号分隔字符串拆成去空白、去空项的切片。
@@ -116,10 +154,17 @@ func (r *ReminderService) Start(spec string, botWebhook string, botSecret string
 
 		switch {
 		case r.appEnabled():
+			useCard := r.cardURL != ""
 			if len(r.chatIDs) > 0 {
 				// 发送到一个或多个指定群
 				for _, cid := range r.chatIDs {
-					if err := r.appSender.SendMessage(context.Background(), "chat_id", cid, content); err != nil {
+					var err error
+					if useCard {
+						err = r.appSender.SendCard(context.Background(), "chat_id", cid, buildCard("周报提醒", content, r.cardURL))
+					} else {
+						err = r.appSender.SendMessage(context.Background(), "chat_id", cid, content)
+					}
+					if err != nil {
 						log.Printf("[Reminder] 应用身份发送群(%s)消息失败: %v", cid, err)
 					}
 				}
@@ -127,7 +172,13 @@ func (r *ReminderService) Start(spec string, botWebhook string, botSecret string
 				// 逐一私信未提交用户本人
 				for _, u := range unsubmittedUsers {
 					personal := fmt.Sprintf("⏰ 周报提醒：你本周（%s）的周报尚未提交，请及时提交！", weekStart)
-					if err := r.appSender.SendMessage(context.Background(), "open_id", u.OpenID, personal); err != nil {
+					var err error
+					if useCard {
+						err = r.appSender.SendCard(context.Background(), "open_id", u.OpenID, buildCard("周报提醒", personal, r.cardURL))
+					} else {
+						err = r.appSender.SendMessage(context.Background(), "open_id", u.OpenID, personal)
+					}
+					if err != nil {
 						log.Printf("[Reminder] 应用身份私信 %s 失败: %v", u.Name, err)
 					}
 				}
@@ -217,10 +268,17 @@ func (r *ReminderService) SendTest(ctx context.Context, toOpenID, webhook, secre
 		content = "🧪 这是周报系统的测试消息"
 	}
 	if r.appEnabled() {
+		useCard := r.cardURL != ""
 		if len(r.chatIDs) > 0 {
 			var firstErr error
 			for _, cid := range r.chatIDs {
-				if err := r.appSender.SendMessage(ctx, "chat_id", cid, content); err != nil && firstErr == nil {
+				var err error
+				if useCard {
+					err = r.appSender.SendCard(ctx, "chat_id", cid, buildCard("周报提醒", content, r.cardURL))
+				} else {
+					err = r.appSender.SendMessage(ctx, "chat_id", cid, content)
+				}
+				if err != nil && firstErr == nil {
 					firstErr = err
 				}
 			}
@@ -228,6 +286,9 @@ func (r *ReminderService) SendTest(ctx context.Context, toOpenID, webhook, secre
 		}
 		if toOpenID == "" {
 			return fmt.Errorf("应用身份发送需要接收者 open_id（请重新登录后重试）")
+		}
+		if useCard {
+			return r.appSender.SendCard(ctx, "open_id", toOpenID, buildCard("周报提醒", content, r.cardURL))
 		}
 		return r.appSender.SendMessage(ctx, "open_id", toOpenID, content)
 	}
@@ -253,9 +314,16 @@ func (r *ReminderService) SendToChats(ctx context.Context, chatIDs []string, con
 		content = "🧪 这是周报系统的测试消息"
 	}
 	results := make([]SendResult, 0, len(chatIDs))
+	useCard := r.cardURL != ""
 	for _, cid := range chatIDs {
 		res := SendResult{Target: cid, Success: true}
-		if err := r.appSender.SendMessage(ctx, "chat_id", cid, content); err != nil {
+		var err error
+		if useCard {
+			err = r.appSender.SendCard(ctx, "chat_id", cid, buildCard("周报提醒", content, r.cardURL))
+		} else {
+			err = r.appSender.SendMessage(ctx, "chat_id", cid, content)
+		}
+		if err != nil {
 			res.Success = false
 			res.Error = err.Error()
 		}

@@ -27,30 +27,34 @@ type TemplateItem struct {
 	URL          string
 	OccurredAt   time.Time
 	OccurredDate string // 格式化后的日期
+	Additions    int    // 代码新增行数（commit）
+	Deletions    int    // 代码删除行数（commit）
 }
 
 // ReportTemplateData 传递给模板引擎的数据结构
 type ReportTemplateData struct {
-	WeekStart      string
-	WeekEnd        string
-	WeekRange      string
-	Tasks          []TemplateItem
-	Commits        []TemplateItem
-	Meetings       []TemplateItem
-	Docs           []TemplateItem
-	NextWeekEvents []TemplateItem
-	Problems       []string // 自动识别到的问题/阻塞项
-	TaskCount      int
-	CommitCount    int
-	MeetingCount   int
-	DocCount       int
-	NextWeekCount  int
-	HasTasks       bool
-	HasCommits     bool
-	HasMeetings    bool
-	HasDocs        bool
-	HasNextWeek    bool
-	HasProblems    bool
+	WeekStart       string
+	WeekEnd         string
+	WeekRange       string
+	Tasks           []TemplateItem
+	Commits         []TemplateItem
+	Meetings        []TemplateItem
+	Docs            []TemplateItem
+	NextWeekEvents  []TemplateItem
+	Problems        []string // 自动识别到的问题/阻塞项
+	TaskCount       int
+	CommitCount     int
+	MeetingCount    int
+	DocCount        int
+	NextWeekCount   int
+	CommitAdditions int // 本周代码新增行数合计
+	CommitDeletions int // 本周代码删除行数合计
+	HasTasks        bool
+	HasCommits      bool
+	HasMeetings     bool
+	HasDocs         bool
+	HasNextWeek     bool
+	HasProblems     bool
 }
 
 // User 用户表（飞书登录后自动创建）
@@ -102,18 +106,19 @@ type WorkRecord struct {
 
 // WeeklyReport 周报表
 type WeeklyReport struct {
-	ID          string     `gorm:"primaryKey" json:"id"`
-	UserID      string     `gorm:"index;not null" json:"user_id"`
-	WeekStart   string     `gorm:"index;not null" json:"week_start"` // 2006-01-02
-	WeekEnd     string     `gorm:"not null" json:"week_end"`
-	TemplateID  uint       `json:"template_id"`
-	Content     string     `gorm:"type:text" json:"content"` // JSON 格式：{"work":"...","problems":"...","plans":"..."}
-	Markdown    string     `gorm:"type:text" json:"markdown"`
-	Status      string     `gorm:"default:'draft'" json:"status"` // draft / submitted
-	SubmittedAt *time.Time `json:"submitted_at"`
-	Version     int        `gorm:"default:1" json:"version"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID           string     `gorm:"primaryKey" json:"id"`
+	UserID       string     `gorm:"index;not null" json:"user_id"`
+	WeekStart    string     `gorm:"index;not null" json:"week_start"` // 2006-01-02
+	WeekEnd      string     `gorm:"not null" json:"week_end"`
+	TemplateID   uint       `json:"template_id"`
+	Content      string     `gorm:"type:text" json:"content"` // JSON 格式：{"work":"...","problems":"...","plans":"..."}
+	Markdown     string     `gorm:"type:text" json:"markdown"`
+	Status       string     `gorm:"default:'draft'" json:"status"` // draft / submitted
+	SubmittedAt  *time.Time `json:"submitted_at"`
+	Version      int        `gorm:"default:1" json:"version"`
+	FeishuDocURL string     `json:"feishu_doc_url"` // 提交后同步到的飞书云文档链接
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // WeeklyReportVersion 周报版本快照表
@@ -165,12 +170,13 @@ type CronJob struct {
 
 // FeishuToken 飞书 Token 存储（内存缓存 + 数据库持久化双保险）
 type FeishuToken struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	UserID    string    `gorm:"uniqueIndex;not null" json:"user_id"`
-	Token     string    `gorm:"not null" json:"token"` // Base64 编码存储
-	ExpiresAt time.Time `json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	UserID       string    `gorm:"uniqueIndex;not null" json:"user_id"`
+	Token        string    `gorm:"not null" json:"token"` // Base64 编码存储
+	RefreshToken string    `json:"refresh_token"`         // Base64 编码存储，用于 access_token 过期后自动续期
+	ExpiresAt    time.Time `json:"expires_at"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // CollectionRequest 采集请求

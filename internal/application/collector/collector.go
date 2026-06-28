@@ -125,6 +125,15 @@ func (c *Collector) Collect(ctx context.Context, req model.CollectionRequest) (*
 		case "lark":
 			token, ok := c.store.GetToken(req.UserID)
 			if !ok {
+				// access_token 过期/缺失时，尝试用 refresh_token 自动续期，避免被迫重新登录
+				if rt, hasRT := c.store.GetRefreshToken(req.UserID); hasRT {
+					if info, err := c.larkAdapter.RefreshToken(ctx, rt); err == nil && info.AccessToken != "" {
+						c.store.SaveTokenFull(req.UserID, info.AccessToken, info.RefreshToken, time.Duration(info.ExpiresIn)*time.Second)
+						token, ok = info.AccessToken, true
+					}
+				}
+			}
+			if !ok {
 				return nil, warnings, fmt.Errorf("user not authorized with Lark, please visit /api/v1/auth/lark/login first")
 			}
 			fetchReq := lark.FetchRequest{
@@ -278,12 +287,15 @@ func (c *Collector) fetchGitLab(ctx context.Context, userID string, weekStart, w
 		}
 
 		for _, commit := range commits {
+			meta, _ := json.Marshal(map[string]int{"additions": commit.Stats.Additions, "deletions": commit.Stats.Deletions})
 			records = append(records, model.WorkRecord{
 				SourceType:  "gitlab",
 				ExternalID:  commit.ID,
 				RecordType:  model.TypeCommit,
 				Title:       cleanCommitSubject(commit.Message),
 				ProjectName: cfg.ProjectPath,
+				URL:         commit.WebURL,
+				Metadata:    string(meta),
 				OccurredAt:  parseGitTime(commit.CreatedAt),
 			})
 		}
@@ -344,12 +356,20 @@ func (c *Collector) fetchGitHub(ctx context.Context, userID string, weekStart, w
 		}
 
 		for _, commit := range commits {
+			// 列表接口不含 stats，单独拉取增删行数与网页链接（失败时降级为 0 与拼接的提交链接）
+			add, del, htmlURL, serr := source.FetchCommitStats(ctx, commit.SHA)
+			if serr != nil || htmlURL == "" {
+				htmlURL = fmt.Sprintf("https://github.com/%s/%s/commit/%s", cfg.Owner, cfg.Repo, commit.SHA)
+			}
+			meta, _ := json.Marshal(map[string]int{"additions": add, "deletions": del})
 			records = append(records, model.WorkRecord{
 				SourceType:  "github",
 				ExternalID:  commit.SHA,
 				RecordType:  model.TypeCommit,
 				Title:       cleanCommitSubject(commit.Commit.Message),
 				ProjectName: fmt.Sprintf("%s/%s", cfg.Owner, cfg.Repo),
+				URL:         htmlURL,
+				Metadata:    string(meta),
 				OccurredAt:  parseGitTime(commit.Commit.Author.Date),
 			})
 		}
@@ -394,7 +414,29 @@ func RenderReport(r *model.WeeklyReport, records []model.WorkRecord, nextWeekEve
 	return buf.String()
 }
 
+// mdLink 当 url 非空时把标题渲染为 markdown 链接。
+func mdLink(title, url string) string {
+	if url == "" {
+		return title
+	}
+	return "[" + title + "](" + url + ")"
+}
+
+// commitStats 从 WorkRecord.Metadata(JSON) 解析提交增删行数。
+func commitStats(metadata string) (additions, deletions int) {
+	if metadata == "" {
+		return 0, 0
+	}
+	var m struct {
+		Additions int `json:"additions"`
+		Deletions int `json:"deletions"`
+	}
+	_ = json.Unmarshal([]byte(metadata), &m)
+	return m.Additions, m.Deletions
+}
+
 func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, nextWeekEvents []model.WorkRecord) string {
+
 	md := fmt.Sprintf("## 本周完成工作 (%s ~ %s)\n\n", r.WeekStart, r.WeekEnd)
 
 	var tasks, commits, meetings, docs []model.WorkRecord
@@ -417,7 +459,7 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 	if len(tasks) > 0 {
 		md += "### 任务进展\n\n"
 		for _, rec := range tasks {
-			md += fmt.Sprintf("- [x] %s\n", rec.Title)
+			md += fmt.Sprintf("- [x] %s\n", mdLink(rec.Title, rec.URL))
 			if rec.Description != "" {
 				md += fmt.Sprintf("  - %s\n", rec.Description)
 			}
@@ -426,19 +468,32 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 	}
 
 	if len(commits) > 0 {
+		// 先累计本周提交增删行数，用于分类标题下的汇总行
+		totalAdd, totalDel := 0, 0
+		for _, rec := range commits {
+			a, d := commitStats(rec.Metadata)
+			totalAdd += a
+			totalDel += d
+		}
 		md += "### 代码提交\n\n"
+		if totalAdd > 0 || totalDel > 0 {
+			md += fmt.Sprintf("> 本周共 %d 次提交，+%d / -%d 行\n", len(commits), totalAdd, totalDel)
+		}
 		for _, rec := range commits {
 			// 标题已在采集时清洗为 commit 首行，这里防御性再取一次首行。
 			title := rec.Title
 			if idx := strings.IndexAny(title, "\r\n"); idx >= 0 {
 				title = title[:idx]
 			}
-			line := fmt.Sprintf("- 💻 %s", title)
+			line := fmt.Sprintf("- 💻 %s", mdLink(title, rec.URL))
 			if rec.ProjectName != "" {
 				line += fmt.Sprintf(" @%s", rec.ProjectName)
 			}
 			if !rec.OccurredAt.IsZero() {
 				line += fmt.Sprintf("（%s）", rec.OccurredAt.Format("01-02"))
+			}
+			if a, d := commitStats(rec.Metadata); a > 0 || d > 0 {
+				line += fmt.Sprintf(" (+%d/-%d)", a, d)
 			}
 			md += line + "\n"
 		}
@@ -448,7 +503,7 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 	if len(meetings) > 0 {
 		md += "### 会议/日程\n\n"
 		for _, rec := range meetings {
-			md += fmt.Sprintf("- 🗓️ %s (%s)\n", rec.Title, rec.OccurredAt.Format("01-02 15:04"))
+			md += fmt.Sprintf("- 🗓️ %s (%s)\n", mdLink(rec.Title, rec.URL), rec.OccurredAt.Format("01-02 15:04"))
 			if rec.Description != "" {
 				md += fmt.Sprintf("  - %s\n", rec.Description)
 			}
@@ -462,7 +517,7 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 	if len(docs) > 0 {
 		md += "### 文档编辑\n\n"
 		for _, rec := range docs {
-			md += fmt.Sprintf("- 📝 %s (%s)\n", rec.Title, rec.OccurredAt.Format("01-02"))
+			md += fmt.Sprintf("- 📝 %s (%s)\n", mdLink(rec.Title, rec.URL), rec.OccurredAt.Format("01-02"))
 		}
 		md += "\n"
 	}
@@ -489,7 +544,7 @@ func renderMarkdownFallback(r *model.WeeklyReport, records []model.WorkRecord, n
 			} else if rec.RecordType == model.TypeTask {
 				icon = "📋"
 			}
-			line := fmt.Sprintf("- [ ] %s %s", icon, rec.Title)
+			line := fmt.Sprintf("- [ ] %s %s", icon, mdLink(rec.Title, rec.URL))
 			if !rec.OccurredAt.IsZero() {
 				line += fmt.Sprintf(" (%s)", rec.OccurredAt.Format("01-02 15:04"))
 			}
@@ -512,6 +567,7 @@ func generateID() string {
 // buildTemplateData 将工作记录转换为模板可用数据结构
 func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.WorkRecord) model.ReportTemplateData {
 	var tasks, commits, meetings, docs []model.TemplateItem
+	totalAdd, totalDel := 0, 0 // 本周代码增删行数合计
 	for _, rec := range records {
 		if rec.IsHidden {
 			continue
@@ -526,6 +582,12 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 		}
 		switch rec.RecordType {
 		case model.TypeCommit:
+			// 从 Metadata(JSON) 解析增删行数，并累计到本周合计
+			a, d := commitStats(rec.Metadata)
+			item.Additions = a
+			item.Deletions = d
+			totalAdd += a
+			totalDel += d
 			commits = append(commits, item)
 		case model.TypeMeeting:
 			meetings = append(meetings, item)
@@ -556,25 +618,27 @@ func buildTemplateData(report *model.WeeklyReport, records, nextWeek []model.Wor
 	problems := extractProblems(records)
 
 	return model.ReportTemplateData{
-		WeekStart:      report.WeekStart,
-		WeekEnd:        report.WeekEnd,
-		WeekRange:      report.WeekStart + " ~ " + report.WeekEnd,
-		Tasks:          tasks,
-		Commits:        commits,
-		Meetings:       meetings,
-		Docs:           docs,
-		NextWeekEvents: nextItems,
-		Problems:       problems,
-		TaskCount:      len(tasks),
-		CommitCount:    len(commits),
-		MeetingCount:   len(meetings),
-		DocCount:       len(docs),
-		NextWeekCount:  len(nextItems),
-		HasTasks:       len(tasks) > 0,
-		HasCommits:     len(commits) > 0,
-		HasMeetings:    len(meetings) > 0,
-		HasDocs:        len(docs) > 0,
-		HasNextWeek:    len(nextItems) > 0,
-		HasProblems:    len(problems) > 0,
+		WeekStart:       report.WeekStart,
+		WeekEnd:         report.WeekEnd,
+		WeekRange:       report.WeekStart + " ~ " + report.WeekEnd,
+		Tasks:           tasks,
+		Commits:         commits,
+		Meetings:        meetings,
+		Docs:            docs,
+		NextWeekEvents:  nextItems,
+		Problems:        problems,
+		TaskCount:       len(tasks),
+		CommitCount:     len(commits),
+		MeetingCount:    len(meetings),
+		DocCount:        len(docs),
+		NextWeekCount:   len(nextItems),
+		CommitAdditions: totalAdd,
+		CommitDeletions: totalDel,
+		HasTasks:        len(tasks) > 0,
+		HasCommits:      len(commits) > 0,
+		HasMeetings:     len(meetings) > 0,
+		HasDocs:         len(docs) > 0,
+		HasNextWeek:     len(nextItems) > 0,
+		HasProblems:     len(problems) > 0,
 	}
 }

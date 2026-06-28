@@ -175,25 +175,57 @@ func decryptToken(enc string) (string, error) {
 }
 
 func (s *Store) SaveToken(userID, token string, expiresIn time.Duration) {
+	s.SaveTokenFull(userID, token, "", expiresIn)
+}
+
+// SaveTokenFull 同时持久化 access_token 与 refresh_token（均加密存储）。
+// refreshToken 为空时保留库中已有的 refresh_token，避免刷新接口未返回新 refresh 时被清空。
+func (s *Store) SaveTokenFull(userID, token, refreshToken string, expiresIn time.Duration) {
 	encrypted, err := encryptToken(token)
 	if err != nil {
 		log.Printf("[ERROR] SaveToken encrypt failed: %v", err)
 		return
+	}
+	encryptedRefresh := ""
+	if refreshToken != "" {
+		if er, err := encryptToken(refreshToken); err == nil {
+			encryptedRefresh = er
+		}
 	}
 	expiresAt := time.Now().Add(expiresIn)
 
 	var ft model.FeishuToken
 	if err := s.db.Where("user_id = ?", userID).First(&ft).Error; err == nil {
 		ft.Token = encrypted
+		if encryptedRefresh != "" {
+			ft.RefreshToken = encryptedRefresh
+		}
 		ft.ExpiresAt = expiresAt
 		s.db.Save(&ft)
 	} else {
 		s.db.Create(&model.FeishuToken{
-			UserID:    userID,
-			Token:     encrypted,
-			ExpiresAt: expiresAt,
+			UserID:       userID,
+			Token:        encrypted,
+			RefreshToken: encryptedRefresh,
+			ExpiresAt:    expiresAt,
 		})
 	}
+}
+
+// GetRefreshToken 返回用户的 refresh_token（解密后），不受 access_token 过期影响。
+func (s *Store) GetRefreshToken(userID string) (string, bool) {
+	var ft model.FeishuToken
+	if err := s.db.Where("user_id = ?", userID).First(&ft).Error; err != nil {
+		return "", false
+	}
+	if ft.RefreshToken == "" {
+		return "", false
+	}
+	rt, err := decryptToken(ft.RefreshToken)
+	if err != nil {
+		return "", false
+	}
+	return rt, true
 }
 
 func (s *Store) GetToken(userID string) (string, bool) {
@@ -484,6 +516,22 @@ func (s *Store) LogAudit(userID, action, targetType, targetID, details, ip strin
 	}
 }
 
+// ListAuditLogs 返回最近 limit 条审计日志（按时间倒序）。userID 非空时按用户过滤。
+func (s *Store) ListAuditLogs(userID string, limit int) ([]model.AuditLog, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var logs []model.AuditLog
+	q := s.db.Order("created_at DESC").Limit(limit)
+	if userID != "" {
+		q = q.Where("user_id = ?", userID)
+	}
+	if err := q.Find(&logs).Error; err != nil {
+		return nil, err
+	}
+	return logs, nil
+}
+
 // --- 新增：CronJob 状态 ---
 
 func (s *Store) GetCronJob(name string) (*model.CronJob, error) {
@@ -603,25 +651,26 @@ func (s *Store) InitDefaultTemplates() error {
 
 {{if .HasTasks}}### 任务进展
 
-{{range .Tasks}}- [x] {{.Title}}
+{{range .Tasks}}- [x] {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}
 {{if .Description}}  - {{.Description}}
 {{end}}{{end}}
 {{end}}
 {{if .HasCommits}}### 代码提交
 
-{{range .Commits}}- 💻 {{.Title}}{{if .ProjectName}} @{{.ProjectName}}{{end}}{{if .OccurredDate}}（{{.OccurredDate}}）{{end}}
+{{if or .CommitAdditions .CommitDeletions}}> 本周共 {{.CommitCount}} 次提交，+{{.CommitAdditions}} / -{{.CommitDeletions}} 行
+{{end}}{{range .Commits}}- 💻 {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}{{if .ProjectName}} @{{.ProjectName}}{{end}}{{if .OccurredDate}}（{{.OccurredDate}}）{{end}}{{if or .Additions .Deletions}} (+{{.Additions}}/-{{.Deletions}}){{end}}
 {{end}}
 {{end}}
 {{if .HasMeetings}}### 会议/日程
 
-{{range .Meetings}}- 🗓️ {{.Title}} ({{.OccurredDate}})
+{{range .Meetings}}- 🗓️ {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}} ({{.OccurredDate}})
 {{if .Description}}  - {{.Description}}
 {{end}}{{if .ProjectName}}  - 📍 地点：{{.ProjectName}}
 {{end}}{{end}}
 {{end}}
 {{if .HasDocs}}### 文档编辑
 
-{{range .Docs}}- 📝 {{.Title}} ({{.OccurredDate}})
+{{range .Docs}}- 📝 {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}} ({{.OccurredDate}})
 {{end}}
 {{end}}
 {{if and (not .HasTasks) (not .HasCommits) (not .HasMeetings) (not .HasDocs)}}- 本周暂无记录
@@ -633,7 +682,7 @@ func (s *Store) InitDefaultTemplates() error {
 {{end}}
 ## 下周计划
 
-{{if .HasNextWeek}}{{range .NextWeekEvents}}- [ ] {{.Title}}{{if .OccurredDate}} ({{.OccurredDate}}){{end}}
+{{if .HasNextWeek}}{{range .NextWeekEvents}}- [ ] {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}{{if .OccurredDate}} ({{.OccurredDate}}){{end}}
 {{if .ProjectName}}  - 📍 地点：{{.ProjectName}}
 {{end}}{{end}}{{else}}- 待补充
 {{end}}`,
@@ -648,23 +697,24 @@ func (s *Store) InitDefaultTemplates() error {
 
 {{if .HasTasks}}### 任务进展
 
-{{range .Tasks}}- [x] {{.Title}}
+{{range .Tasks}}- [x] {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}
 {{if .Description}}  - {{.Description}}
 {{end}}{{end}}
 {{end}}
 {{if .HasCommits}}### 代码提交
 
-{{range .Commits}}- 💻 {{.Title}}{{if .ProjectName}} @{{.ProjectName}}{{end}}{{if .OccurredDate}}（{{.OccurredDate}}）{{end}}
+{{if or .CommitAdditions .CommitDeletions}}> 本周共 {{.CommitCount}} 次提交，+{{.CommitAdditions}} / -{{.CommitDeletions}} 行
+{{end}}{{range .Commits}}- 💻 {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}}{{if .ProjectName}} @{{.ProjectName}}{{end}}{{if .OccurredDate}}（{{.OccurredDate}}）{{end}}{{if or .Additions .Deletions}} (+{{.Additions}}/-{{.Deletions}}){{end}}
 {{end}}
 {{end}}
 {{if .HasMeetings}}### 会议/日程
 
-{{range .Meetings}}- {{.Title}} ({{.OccurredDate}})
+{{range .Meetings}}- {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}} ({{.OccurredDate}})
 {{end}}
 {{end}}
 {{if .HasDocs}}### 文档编辑
 
-{{range .Docs}}- {{.Title}} ({{.OccurredDate}})
+{{range .Docs}}- {{if .URL}}[{{.Title}}]({{.URL}}){{else}}{{.Title}}{{end}} ({{.OccurredDate}})
 {{end}}
 {{end}}
 {{if and (not .HasTasks) (not .HasCommits) (not .HasMeetings) (not .HasDocs)}}- 本周暂无记录

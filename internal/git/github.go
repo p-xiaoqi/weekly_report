@@ -21,6 +21,12 @@ type GitHubCommit struct {
 			Date string `json:"date"`
 		} `json:"author"`
 	} `json:"commit"`
+	HTMLURL string `json:"html_url"`
+	Stats   struct {
+		Additions int `json:"additions"`
+		Deletions int `json:"deletions"`
+		Total     int `json:"total"`
+	} `json:"stats"`
 }
 
 // GitHubSource GitHub 数据源实现
@@ -74,6 +80,32 @@ func (g *GitHubSource) FetchCommits(ctx context.Context, author string, weekStar
 		page++
 	}
 	return allCommits, nil
+}
+
+// FetchCommitStats 获取单个提交的增删行数及网页链接。
+// 列表接口不返回 stats，需单独 GET 提交详情接口。
+func (g *GitHubSource) FetchCommitStats(ctx context.Context, sha string) (additions, deletions int, htmlURL string, err error) {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", g.Owner, g.Repo, sha)
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0, 0, "", githubError(resp.StatusCode, body, g.Owner, g.Repo)
+	}
+	var detail GitHubCommit
+	if err := json.Unmarshal(body, &detail); err != nil {
+		return 0, 0, "", err
+	}
+	return detail.Stats.Additions, detail.Stats.Deletions, detail.HTMLURL, nil
 }
 
 // TestConnection 测试 GitHub 连接

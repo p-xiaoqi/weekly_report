@@ -17,6 +17,11 @@ type GitLabCommit struct {
 	Message    string `json:"message"`
 	AuthorName string `json:"author_name"`
 	CreatedAt  string `json:"created_at"`
+	WebURL     string `json:"web_url"`
+	Stats      struct {
+		Additions int `json:"additions"`
+		Deletions int `json:"deletions"`
+	} `json:"stats"`
 }
 
 // GitLabSource GitLab 数据源实现
@@ -37,7 +42,7 @@ func (g *GitLabSource) FetchCommits(ctx context.Context, authorEmail string, wee
 	var allCommits []GitLabCommit
 	page := 1
 	for {
-		apiURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/commits?since=%s&until=%s&per_page=100&page=%d",
+		apiURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/commits?since=%s&until=%s&per_page=100&page=%d&with_stats=true",
 			baseURL, encodedPath, weekStart.Format(time.RFC3339), weekEnd.Format(time.RFC3339), page)
 		if authorEmail != "" {
 			apiURL += "&author_email=" + url.QueryEscape(authorEmail)

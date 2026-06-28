@@ -73,6 +73,31 @@
         .tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--border); margin-bottom: 16px; }
         .tab { padding: 10px 16px; border: none; background: none; cursor: pointer; font-size: 14px; color: var(--text-secondary); border-bottom: 2px solid transparent; margin-bottom: -2px; }
         .tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+        .tag.error { background: #fef0f0; color: var(--danger); }
+        .tag.danger { background: #fef0f0; color: var(--danger); }
+        /* 数据源连通性圆点 */
+        .ds-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: middle; }
+        .ds-dot.success { background: var(--success); }
+        .ds-dot.failed { background: var(--danger); }
+        .ds-dot.pending { background: #c0c4cc; }
+        /* 提交状态徽标 */
+        .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; color: #fff; font-weight: 500; }
+        .badge.green { background: var(--success); }
+        .badge.red { background: var(--danger); }
+        /* Markdown 渲染区域样式 */
+        .md-body { white-space: normal; }
+        .md-body h1, .md-body h2, .md-body h3, .md-body h4 { margin: 14px 0 8px; line-height: 1.4; }
+        .md-body h1 { font-size: 22px; } .md-body h2 { font-size: 19px; } .md-body h3 { font-size: 16px; }
+        .md-body p { margin: 8px 0; }
+        .md-body ul, .md-body ol { padding-left: 22px; margin: 8px 0; }
+        .md-body li { margin: 3px 0; }
+        .md-body code { background: #f0f2f5; padding: 1px 5px; border-radius: 4px; font-family: 'Menlo','Monaco',monospace; font-size: 90%; }
+        .md-body pre { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 8px; overflow: auto; }
+        .md-body pre code { background: none; padding: 0; color: inherit; }
+        .md-body blockquote { border-left: 4px solid var(--border); margin: 8px 0; padding: 4px 12px; color: var(--text-secondary); }
+        .md-body table { border-collapse: collapse; margin: 8px 0; }
+        .md-body th, .md-body td { border: 1px solid var(--border); padding: 4px 10px; }
+        .md-body a { color: var(--primary); }
     </style>
 </head>
 <body>
@@ -138,11 +163,18 @@
                         <button class="btn btn-success" onclick="submitReport()">✅ 提交周报</button>
                     </div>
 
-                    <!-- 草稿编辑 -->
+                    <!-- 草稿编辑（左：Markdown 源，右：实时预览） -->
                     <div class="section" style="margin-top:20px;">
                         <div class="card-title" style="font-size:15px;">✏️ 编辑草稿</div>
-                        <div class="form-group">
-                            <textarea id="edit-markdown" rows="10" placeholder="在此编辑周报 Markdown 草稿..."></textarea>
+                        <div class="grid-2">
+                            <div class="form-group" style="margin-bottom:0;">
+                                <label>Markdown 源（保存以此为准）</label>
+                                <textarea id="edit-markdown" rows="14" placeholder="在此编辑周报 Markdown 草稿..." oninput="updateEditPreview()"></textarea>
+                            </div>
+                            <div class="form-group" style="margin-bottom:0;">
+                                <label>实时预览</label>
+                                <div id="edit-preview" class="report-preview" style="overflow:auto;max-height:340px;"></div>
+                            </div>
                         </div>
                         <div class="btn-group">
                             <button class="btn btn-primary" onclick="saveReportEdit()">💾 保存</button>
@@ -193,6 +225,9 @@
             <div class="btn-group">
                 <button class="btn btn-primary" onclick="loadStats()">📥 加载趋势</button>
             </div>
+            <div id="stats-chart-wrap" class="hidden" style="margin-top:16px;">
+                <canvas id="stats-chart" height="120"></canvas>
+            </div>
             <div id="stats-result" style="margin-top:12px;"></div>
         </div>
 
@@ -229,6 +264,29 @@
                 <button class="btn btn-primary" id="btn-add-tmpl" onclick="showTemplateModal()">➕ 创建模板</button>
                 <button class="btn btn-secondary" onclick="refreshTemplates()">🔄 刷新</button>
             </div>
+        </div>
+
+        <!-- 团队提交看板（仅管理员） -->
+        <div class="card">
+            <div class="card-title">🗂️ 团队看板</div>
+            <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label>周一开始日期（可选）</label>
+                    <input type="date" id="board-week" style="width:auto;" />
+                </div>
+                <button class="btn btn-primary" onclick="loadSubmissions()">📋 加载看板</button>
+            </div>
+            <div id="board-summary" style="margin-top:14px;"></div>
+            <div id="board-result" style="margin-top:12px;"></div>
+        </div>
+
+        <!-- 操作日志（审计，仅管理员） -->
+        <div class="card">
+            <div class="card-title">🛡️ 操作日志（审计）</div>
+            <div class="btn-group">
+                <button class="btn btn-primary" onclick="loadAuditLogs()">📥 加载审计日志</button>
+            </div>
+            <div id="audit-result" style="margin-top:12px;"></div>
         </div>
 
         <!-- 日志 -->
@@ -308,6 +366,9 @@
         </div>
     </div>
 
+    <!-- 轻量第三方库（CDN）：marked 用于 Markdown 渲染，Chart.js 用于趋势图表。加载失败时相关功能会优雅降级。 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
         // ---------- 全局登录状态 ----------
         // isLoggedIn 由 initAuth 维护，作为前端唯一的登录真值来源。
@@ -330,6 +391,31 @@
         function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
         // 本地日期格式化（YYYY-MM-DD），避免 toISOString 的 UTC 时区偏移
         function formatLocalDate(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+        // 将 Markdown 渲染进目标元素：marked 可用时渲染为 HTML（加 .md-body 样式），
+        // 否则降级为转义后的纯文本（<pre>），保证 marked 加载失败时仍可读。
+        function renderMarkdownInto(el, md){
+            if (!el) return;
+            md = md == null ? '' : String(md);
+            if (window.marked) {
+                try {
+                    el.innerHTML = (typeof marked.parse === 'function') ? marked.parse(md) : marked(md);
+                    el.classList.add('md-body');
+                    return;
+                } catch (e) { /* 渲染异常时降级 */ }
+            }
+            el.classList.remove('md-body');
+            const pre = document.createElement('pre');
+            pre.style.whiteSpace = 'pre-wrap';
+            pre.style.margin = '0';
+            pre.textContent = md;
+            el.innerHTML = '';
+            el.appendChild(pre);
+        }
+        // 草稿编辑区的实时预览：以 textarea 为准，input 时刷新右侧预览。
+        function updateEditPreview(){
+            const ta = document.getElementById('edit-markdown');
+            renderMarkdownInto(document.getElementById('edit-preview'), ta ? ta.value : '');
+        }
         function addLog(msg, type = 'info') {
             const logArea = document.getElementById('log-area');
             const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -502,9 +588,10 @@
             const report = data.report;
             const preview = document.getElementById('report-preview');
             const raw = document.getElementById('raw-data');
-            preview.textContent = report.markdown;
+            renderMarkdownInto(preview, report.markdown);
             const edit = document.getElementById('edit-markdown');
             if (edit) edit.value = report.markdown || '';
+            updateEditPreview();
             raw.textContent = JSON.stringify(data, null, 2);
             document.getElementById('result-area').classList.remove('hidden');
             loadComments();
@@ -522,7 +609,8 @@
                 if (data.code === 0) {
                     showToast('✅ 草稿已保存', 'success');
                     addLog('草稿已保存并生成新版本', 'success');
-                    document.getElementById('report-preview').textContent = (data.data && data.data.report) ? data.data.report.markdown : markdown;
+                    const md = (data.data && data.data.report) ? data.data.report.markdown : markdown;
+                    renderMarkdownInto(document.getElementById('report-preview'), md);
                 } else {
                     showToast(data.message || data.error || '保存失败', 'error');
                 }
@@ -600,6 +688,37 @@
         }
 
         // ---------- 趋势统计 ----------
+        let statsChart = null; // Chart.js 实例，刷新时先 destroy 再重建，避免 "canvas already in use"
+        function renderStatsChart(list) {
+            const wrap = document.getElementById('stats-chart-wrap');
+            const canvas = document.getElementById('stats-chart');
+            // Chart.js 未加载（CDN 失败）时静默跳过图表，表格仍可用
+            if (!window.Chart || !canvas) { if (wrap) wrap.classList.add('hidden'); return; }
+            // 后端按最新在前返回，反转为「旧 → 新」用于 x 轴
+            const ordered = list.slice().reverse();
+            const labels = ordered.map(s => s.week);
+            const commits = ordered.map(s => s.commit_count || 0);
+            const tasks = ordered.map(s => s.task_count || 0);
+            const meetings = ordered.map(s => s.meeting_count || 0);
+            if (statsChart) { statsChart.destroy(); statsChart = null; }
+            wrap.classList.remove('hidden');
+            statsChart = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [
+                        { label: '提交', data: commits, borderColor: '#409eff', backgroundColor: 'rgba(64,158,255,0.12)', tension: 0.3, fill: true },
+                        { label: '任务', data: tasks, borderColor: '#67c23a', backgroundColor: 'rgba(103,194,58,0.12)', tension: 0.3, fill: true },
+                        { label: '会议', data: meetings, borderColor: '#e6a23c', backgroundColor: 'rgba(230,162,60,0.12)', tension: 0.3, fill: true }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    plugins: { legend: { position: 'top' } },
+                    scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+                }
+            });
+        }
         async function loadStats() {
             const box = document.getElementById('stats-result');
             try {
@@ -608,9 +727,12 @@
                 if (data.code !== 0) { showToast(data.error || '加载统计失败', 'error'); return; }
                 const list = data.data || [];
                 if (list.length === 0) {
+                    document.getElementById('stats-chart-wrap').classList.add('hidden');
+                    if (statsChart) { statsChart.destroy(); statsChart = null; }
                     box.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div>暂无统计数据</div>';
                     return;
                 }
+                renderStatsChart(list);
                 const rows = list.map(s => `<tr style="border-bottom:1px solid var(--border);">
                     <td style="padding:6px 10px;">${escapeHtml(s.week)}</td>
                     <td style="padding:6px 10px;text-align:center;">${s.commit_count || 0}</td>
@@ -721,13 +843,13 @@
                 </div>
             `).join('');
         }
-        // 查看指定版本的 markdown 内容（复用 report-preview 的 textContent 转义渲染）。
+        // 查看指定版本的 markdown 内容（marked 可用时渲染为 HTML，否则降级纯文本）。
         function viewVersion(version) {
             const v = currentVersions.find(x => x.version === version);
             if (!v) { showToast('版本不存在', 'error'); return; }
             selectedVersion = version;
             document.getElementById('version-viewer-title').textContent = `版本 v${version}（${v.created_at || ''}）`;
-            document.getElementById('version-content').textContent = v.content || '';
+            renderMarkdownInto(document.getElementById('version-content'), v.content || '');
             document.getElementById('version-viewer').classList.remove('hidden');
             renderVersionList(); // 重新渲染以高亮当前选中版本
         }
@@ -750,9 +872,10 @@
                     showToast(`✅ 已恢复到版本 v${selectedVersion}`, 'success');
                     addLog(`♻️ 已恢复到版本 v${selectedVersion} 并生成新版本`, 'success');
                     const md = (data.data && data.data.report) ? data.data.report.markdown : (v.content || '');
-                    document.getElementById('report-preview').textContent = md;
+                    renderMarkdownInto(document.getElementById('report-preview'), md);
                     const edit = document.getElementById('edit-markdown');
                     if (edit) edit.value = md;
+                    updateEditPreview();
                     loadVersions(); // 刷新版本列表（含新生成的版本）
                 } else {
                     showToast(data.message || data.error || '恢复失败', 'error');
@@ -936,6 +1059,7 @@
                     list.innerHTML = items.map(ds => `
                         <div class="datasource-item">
                             <div>
+                                <span class="ds-dot ${ds.sync_status === 'success' ? 'success' : ds.sync_status === 'failed' ? 'failed' : 'pending'}" title="${escapeHtml(ds.sync_status || 'pending')}"></span>
                                 <span class="tag primary">${escapeHtml(ds.type)}</span>
                                 <strong>${escapeHtml(ds.name)}</strong>
                                 <span class="tag ${ds.sync_status === 'success' ? 'success' : ds.sync_status === 'failed' ? 'error' : 'warn'}">${escapeHtml(ds.sync_status || 'pending')}</span>
@@ -1161,6 +1285,112 @@
                 if (data.code === 0) { showToast('删除成功', 'success'); refreshTemplates(); }
                 else { showToast(data.error || '删除失败', 'error'); }
             } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+        }
+
+        // ---------- 团队提交看板（仅管理员） ----------
+        // GET /api/v1/admin/submissions[?week=YYYY-MM-DD]
+        // 非管理员返回 403，这里友好提示「仅管理员可见」而不破坏页面。
+        async function loadSubmissions() {
+            const summaryBox = document.getElementById('board-summary');
+            const box = document.getElementById('board-result');
+            const week = document.getElementById('board-week').value;
+            summaryBox.innerHTML = '';
+            box.innerHTML = '<span style="color:#888;">加载中…</span>';
+            try {
+                const url = '/api/v1/admin/submissions' + (week ? ('?week=' + encodeURIComponent(week)) : '');
+                const res = await fetch(url, { credentials: 'include' });
+                if (res.status === 403) {
+                    summaryBox.innerHTML = '';
+                    box.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔒</div>仅管理员可见</div>';
+                    addLog('团队看板：仅管理员可见（403）', 'warn');
+                    return;
+                }
+                const data = await res.json();
+                if (!res.ok || data.code !== 0) {
+                    box.innerHTML = '<span style="color:#c0392b;">' + escapeHtml((data && (data.error || data.message)) || ('加载失败 (' + res.status + ')')) + '</span>';
+                    return;
+                }
+                const d = data.data || {};
+                const members = Array.isArray(d.members) ? d.members : [];
+                summaryBox.innerHTML = `
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+                        <span class="status">📅 ${escapeHtml(d.week || week || '-')}</span>
+                        <span class="status ok"><span class="status-dot"></span>已提交 ${d.submitted || 0}</span>
+                        <span class="status error"><span class="status-dot"></span>未提交 ${d.unsubmitted || 0}</span>
+                        <span class="status">共 ${d.total || members.length}</span>
+                    </div>`;
+                if (members.length === 0) {
+                    box.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div>暂无成员数据</div>';
+                    return;
+                }
+                const rows = members.map(m => {
+                    const submitted = m.status === 'submitted';
+                    const badge = submitted ? '<span class="badge green">已提交</span>' : '<span class="badge red">未提交</span>';
+                    return `<tr style="border-bottom:1px solid var(--border);">
+                        <td style="padding:6px 10px;">${escapeHtml(m.name || m.open_id || '-')}</td>
+                        <td style="padding:6px 10px;font-family:monospace;font-size:12px;color:#666;">${escapeHtml(m.open_id || '')}</td>
+                        <td style="padding:6px 10px;text-align:center;">${badge}</td>
+                    </tr>`;
+                }).join('');
+                box.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:14px;">
+                    <thead><tr style="border-bottom:2px solid var(--border);">
+                        <th style="padding:6px 10px;text-align:left;">成员</th>
+                        <th style="padding:6px 10px;text-align:left;">open_id</th>
+                        <th style="padding:6px 10px;">状态</th>
+                    </tr></thead><tbody>${rows}</tbody></table>`;
+                addLog(`🗂️ 团队看板：已提交 ${d.submitted || 0} / 未提交 ${d.unsubmitted || 0}`, 'success');
+            } catch (e) {
+                box.innerHTML = '<span style="color:#c0392b;">' + escapeHtml(e.message) + '</span>';
+                addLog('加载团队看板失败: ' + e.message, 'error');
+            }
+        }
+
+        // ---------- 操作日志（审计，仅管理员） ----------
+        // GET /api/v1/admin/audit-logs?limit=100 ；非管理员 403 → 友好提示。
+        async function loadAuditLogs() {
+            const box = document.getElementById('audit-result');
+            box.innerHTML = '<span style="color:#888;">加载中…</span>';
+            try {
+                const res = await fetch('/api/v1/admin/audit-logs?limit=100', { credentials: 'include' });
+                if (res.status === 403) {
+                    box.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔒</div>仅管理员可见</div>';
+                    addLog('操作日志：仅管理员可见（403）', 'warn');
+                    return;
+                }
+                const data = await res.json();
+                if (!res.ok || data.code !== 0) {
+                    box.innerHTML = '<span style="color:#c0392b;">' + escapeHtml((data && (data.error || data.message)) || ('加载失败 (' + res.status + ')')) + '</span>';
+                    return;
+                }
+                const list = Array.isArray(data.data) ? data.data : [];
+                if (list.length === 0) {
+                    box.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div>暂无操作日志</div>';
+                    return;
+                }
+                const rows = list.map(it => `<tr style="border-bottom:1px solid var(--border);">
+                    <td style="padding:6px 10px;white-space:nowrap;color:#666;">${escapeHtml(it.created_at || '')}</td>
+                    <td style="padding:6px 10px;white-space:nowrap;">${escapeHtml(String(it.user_id == null ? '' : it.user_id))}</td>
+                    <td style="padding:6px 10px;"><span class="tag primary">${escapeHtml(it.action || '')}</span></td>
+                    <td style="padding:6px 10px;">${escapeHtml((it.target_type || '') + (it.target_id != null && it.target_id !== '' ? ('#' + it.target_id) : ''))}</td>
+                    <td style="padding:6px 10px;max-width:280px;word-break:break-all;">${escapeHtml(it.details || '')}</td>
+                    <td style="padding:6px 10px;font-family:monospace;font-size:12px;color:#666;white-space:nowrap;">${escapeHtml(it.ip_address || '')}</td>
+                </tr>`).join('');
+                box.innerHTML = `<div style="max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:8px;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                        <thead><tr style="background:#f8fafc;text-align:left;position:sticky;top:0;">
+                            <th style="padding:6px 10px;">时间</th>
+                            <th style="padding:6px 10px;">用户</th>
+                            <th style="padding:6px 10px;">操作</th>
+                            <th style="padding:6px 10px;">对象</th>
+                            <th style="padding:6px 10px;">详情</th>
+                            <th style="padding:6px 10px;">IP</th>
+                        </tr></thead><tbody>${rows}</tbody>
+                    </table></div>`;
+                addLog(`🛡️ 操作日志：${list.length} 条`, 'success');
+            } catch (e) {
+                box.innerHTML = '<span style="color:#c0392b;">' + escapeHtml(e.message) + '</span>';
+                addLog('加载操作日志失败: ' + e.message, 'error');
+            }
         }
     </script>
 </body>

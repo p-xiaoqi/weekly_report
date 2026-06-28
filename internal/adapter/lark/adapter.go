@@ -23,6 +23,11 @@ func (a *Adapter) Type() string {
 	return "lark"
 }
 
+// RefreshToken 用 refresh_token 续期 user_access_token（封装内部 client）。
+func (a *Adapter) RefreshToken(ctx context.Context, refreshToken string) (*UserTokenInfo, error) {
+	return a.client.RefreshUserAccessToken(ctx, refreshToken)
+}
+
 func parseTimestampOrRFC3339(s string) time.Time {
 	if s == "" {
 		return time.Time{}
@@ -94,6 +99,7 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 					Title:       task.Summary,
 					Description: task.Notes,
 					ProjectName: task.TopicName,
+					URL:         "https://applink.feishu.cn/client/todo/detail?guid=" + task.GUID,
 					OccurredAt:  completedTime,
 				})
 				continue
@@ -120,6 +126,7 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 				Title:       task.Summary,
 				Description: task.Notes,
 				ProjectName: task.TopicName,
+				URL:         "https://applink.feishu.cn/client/todo/detail?guid=" + task.GUID,
 				OccurredAt:  dueTime,
 			})
 		}
@@ -142,6 +149,10 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 				log.Printf("[WARN] 日历事件时间解析失败: %s", event.StartTime.Timestamp)
 			}
 			log.Printf("[DEBUG] 日历事件: %s, time=%s", event.Summary, occurredAt.Format("2006-01-02 15:04"))
+			calURL := ""
+			if event.StartTime.Timestamp != "" {
+				calURL = "https://applink.feishu.cn/client/calendar/view?startTime=" + event.StartTime.Timestamp
+			}
 			records = append(records, model.WorkRecord{
 				SourceType:  "lark",
 				ExternalID:  event.EventID,
@@ -149,6 +160,7 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 				Title:       event.Summary,
 				Description: event.Description,
 				ProjectName: event.Location.Name,
+				URL:         calURL,
 				OccurredAt:  occurredAt,
 			})
 		}
@@ -179,6 +191,7 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 				Title:       doc.Name,
 				Description: "",
 				ProjectName: "",
+				URL:         doc.URL,
 				OccurredAt:  occurredAt,
 			})
 		}
@@ -198,6 +211,10 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 				continue
 			}
 			occurredAt := parseTimestampOrRFC3339(event.StartTime.Timestamp)
+			calURL := ""
+			if event.StartTime.Timestamp != "" {
+				calURL = "https://applink.feishu.cn/client/calendar/view?startTime=" + event.StartTime.Timestamp
+			}
 			nextWeekEvents = append(nextWeekEvents, model.WorkRecord{
 				SourceType:  "lark",
 				ExternalID:  event.EventID,
@@ -205,6 +222,7 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 				Title:       event.Summary,
 				Description: event.Description,
 				ProjectName: event.Location.Name,
+				URL:         calURL,
 				OccurredAt:  occurredAt,
 			})
 		}

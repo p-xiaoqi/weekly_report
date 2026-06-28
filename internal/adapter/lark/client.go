@@ -303,10 +303,314 @@ func (c *Client) GetUserAccessToken(ctx context.Context, code string) (*UserToke
 	}, nil
 }
 
+// RefreshUserAccessToken 用 refresh_token 续期 user_access_token。
+
+// 失败时返回错误（常见 20007: refresh_token 过期，需要用户重新授权登录）。
+
+func (c *Client) RefreshUserAccessToken(ctx context.Context, refreshToken string) (*UserTokenInfo, error) {
+
+	appToken, err := c.getTenantToken(ctx)
+
+	if err != nil {
+
+		return nil, err
+
+	}
+
+	reqBody := map[string]string{
+
+		"grant_type": "refresh_token",
+
+		"refresh_token": refreshToken,
+	}
+
+	data, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+
+		"https://open.feishu.cn/open-apis/authen/v1/refresh_access_token",
+
+		bytes.NewReader(data))
+
+	if err != nil {
+
+		return nil, err
+
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	req.Header.Set("Authorization", "Bearer "+appToken)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+
+		return nil, err
+
+	}
+
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int `json:"code"`
+
+		Msg string `json:"msg"`
+
+		Data struct {
+			AccessToken string `json:"access_token"`
+
+			RefreshToken string `json:"refresh_token"`
+
+			ExpiresIn int `json:"expires_in"`
+
+			OpenID string `json:"open_id"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+
+		return nil, fmt.Errorf("刷新 token 响应无法解析(HTTP %d): %s", resp.StatusCode, string(body))
+
+	}
+
+	if result.Code != 0 {
+
+		return nil, fmt.Errorf("refresh user token failed: code=%d, msg=%s", result.Code, result.Msg)
+
+	}
+
+	return &UserTokenInfo{
+
+		AccessToken: result.Data.AccessToken,
+
+		RefreshToken: result.Data.RefreshToken,
+
+		ExpiresIn: result.Data.ExpiresIn,
+
+		OpenID: result.Data.OpenID,
+	}, nil
+
+}
+
+// SendCard 用应用身份发送 interactive 卡片消息。card 为飞书卡片 JSON 结构。
+
+func (c *Client) SendCard(ctx context.Context, receiveIDType, receiveID string, card interface{}) error {
+
+	token, err := c.getTenantToken(ctx)
+
+	if err != nil {
+
+		return fmt.Errorf("获取 tenant_access_token 失败: %w", err)
+
+	}
+
+	cardBytes, _ := json.Marshal(card)
+
+	reqBody := map[string]string{
+
+		"receive_id": receiveID,
+
+		"msg_type": "interactive",
+
+		"content": string(cardBytes),
+	}
+
+	data, _ := json.Marshal(reqBody)
+
+	url := "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=" + receiveIDType
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+
+	if err != nil {
+
+		return err
+
+	}
+
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+
+		return err
+
+	}
+
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int `json:"code"`
+
+		Msg string `json:"msg"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+
+		return fmt.Errorf("飞书发送卡片响应无法解析(HTTP %d): %s", resp.StatusCode, string(body))
+
+	}
+
+	if result.Code != 0 {
+
+		return fmt.Errorf("飞书发送卡片失败 code=%d msg=%s", result.Code, result.Msg)
+
+	}
+
+	return nil
+
+}
+
+// BuildReminderCard 构造"周报提醒"交互卡片，附带"立即填写"跳转按钮。
+
+func BuildReminderCard(title, content, buttonText, url string) map[string]interface{} {
+
+	elements := []interface{}{
+
+		map[string]interface{}{
+
+			"tag": "div",
+
+			"text": map[string]interface{}{
+
+				"tag": "lark_md",
+
+				"content": content,
+			},
+		},
+	}
+
+	if url != "" {
+
+		if buttonText == "" {
+
+			buttonText = "立即填写"
+
+		}
+
+		elements = append(elements, map[string]interface{}{
+
+			"tag": "action",
+
+			"actions": []interface{}{
+
+				map[string]interface{}{
+
+					"tag": "button",
+
+					"text": map[string]interface{}{"tag": "plain_text", "content": buttonText},
+
+					"type": "primary",
+
+					"url": url,
+				},
+			},
+		})
+
+	}
+
+	return map[string]interface{}{
+
+		"config": map[string]interface{}{"wide_screen_mode": true},
+
+		"header": map[string]interface{}{
+
+			"template": "orange",
+
+			"title": map[string]interface{}{"tag": "plain_text", "content": title},
+		},
+
+		"elements": elements,
+	}
+
+}
+
+// CreateDocWithText 用应用身份创建一篇飞书云文档，并写入一段纯文本（markdown 原文）。
+// 创建失败返回错误；写入正文失败时仍返回文档链接（best-effort）。
+func (c *Client) CreateDocWithText(ctx context.Context, title, markdown string) (docURL string, err error) {
+	token, err := c.getTenantToken(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	// 1) 创建空文档
+	createBody, _ := json.Marshal(map[string]string{"title": title})
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://open.feishu.cn/open-apis/docx/v1/documents", bytes.NewReader(createBody))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var createResult struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Document struct {
+				DocumentID string `json:"document_id"`
+			} `json:"document"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &createResult); err != nil {
+		return "", fmt.Errorf("创建飞书文档响应无法解析(HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	if createResult.Code != 0 || createResult.Data.Document.DocumentID == "" {
+		return "", fmt.Errorf("创建飞书文档失败 code=%d msg=%s", createResult.Code, createResult.Msg)
+	}
+	documentID := createResult.Data.Document.DocumentID
+	docURL = "https://feishu.cn/docx/" + documentID
+
+	// 2) 追加一个文本块（block_type=2），失败时仍返回文档链接
+	childBody, _ := json.Marshal(map[string]interface{}{
+		"children": []interface{}{
+			map[string]interface{}{
+				"block_type": 2,
+				"text": map[string]interface{}{
+					"elements": []interface{}{
+						map[string]interface{}{
+							"text_run": map[string]interface{}{"content": markdown},
+						},
+					},
+				},
+			},
+		},
+	})
+	childURL := fmt.Sprintf("https://open.feishu.cn/open-apis/docx/v1/documents/%s/blocks/%s/children", documentID, documentID)
+	creq, err := http.NewRequestWithContext(ctx, "POST", childURL, bytes.NewReader(childBody))
+	if err != nil {
+		return docURL, nil
+	}
+	creq.Header.Set("Content-Type", "application/json; charset=utf-8")
+	creq.Header.Set("Authorization", "Bearer "+token)
+	cresp, err := c.httpClient.Do(creq)
+	if err != nil {
+		return docURL, nil
+	}
+	cresp.Body.Close()
+	return docURL, nil
+}
+
 func (c *Client) FetchUserTasks(ctx context.Context, userAccessToken string) ([]Task, error) {
+
 	token := userAccessToken
+
 	if token == "" {
+
 		var err error
+
 		token, err = c.getTenantToken(ctx)
 		if err != nil {
 			return nil, err

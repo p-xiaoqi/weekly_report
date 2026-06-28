@@ -13,8 +13,9 @@ import (
 
 type Config struct {
 	Server struct {
-		Port string `yaml:"port"`
-		Mode string `yaml:"mode"` // debug / release
+		Port    string `yaml:"port"`
+		Mode    string `yaml:"mode"`     // debug / release
+		BaseURL string `yaml:"base_url"` // 系统对外访问基础地址，用于卡片按钮跳转
 	} `yaml:"server"`
 	Feishu struct {
 		AppID       string `yaml:"app_id"`
@@ -151,6 +152,13 @@ func Load() (*Config, error) {
 	}
 	if cfg.Server.Mode == "" {
 		cfg.Server.Mode = "debug"
+	}
+	// 系统对外基础地址：默认 localhost+端口，可由 SYSTEM_BASE_URL 覆盖
+	if cfg.Server.BaseURL == "" {
+		cfg.Server.BaseURL = "http://localhost:" + cfg.Server.Port
+	}
+	if v := os.Getenv("SYSTEM_BASE_URL"); v != "" {
+		cfg.Server.BaseURL = v
 	}
 	if cfg.Database.Path == "" {
 		cfg.Database.Path = "weekly_report.db"

@@ -10,8 +10,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -20,6 +23,7 @@ import (
 
 	"weekly-report-system/internal/adapter/lark"
 	"weekly-report-system/internal/application/collector"
+	"weekly-report-system/internal/backup"
 	"weekly-report-system/internal/config"
 	"weekly-report-system/internal/database"
 	"weekly-report-system/internal/git"
@@ -216,6 +220,8 @@ func main() {
 
 	storeDB = store.New(db)
 	storeDB.InitDefaultTemplates()
+	// 启动 SQLite 自动备份（立即一次 + 每日）
+	backup.Start(cfg.Database.Path)
 	larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret)
 
 	// 采集服务
@@ -226,6 +232,8 @@ func main() {
 	reminderSvc = reminder.NewReminderService(storeDB)
 	// 注入应用身份发送器：启用后用 App ID/Secret 经 im API 发消息（替代 webhook）。
 	reminderSvc.SetAppSender(larkClient, cfg.Reminder.UseApp, cfg.Reminder.ChatID)
+	// 设置卡片"立即填写"按钮跳转地址，启用交互卡片提醒
+	reminderSvc.SetCardURL(cfg.Server.BaseURL + "/test.html")
 	if cfg.Reminder.Enabled {
 		reminderSvc.Start(cfg.Reminder.Cron, cfg.Reminder.BotWebhook, cfg.Reminder.BotSecret)
 	}
@@ -335,6 +343,8 @@ func main() {
 		admin.Use(adminMiddleware())
 		{
 			admin.POST("/remind", testRemindHandler)
+			admin.GET("/submissions", submissionsHandler)
+			admin.GET("/audit-logs", auditLogsHandler)
 		}
 	}
 
@@ -353,6 +363,23 @@ func main() {
 		// 其他路径尝试静态文件
 		http.FileServer(http.Dir("./web")).ServeHTTP(c.Writer, c.Request)
 	})
+
+	// 监听 SIGHUP 实现配置热重载（管理员白名单、提醒目标等无需重启即可生效）
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGHUP)
+		for range sigCh {
+			newCfg, err := config.Load()
+			if err != nil {
+				log.Printf("[hot-reload] 配置重新加载失败: %v", err)
+				continue
+			}
+			cfg = newCfg
+			reminderSvc.SetAppSender(larkClient, cfg.Reminder.UseApp, cfg.Reminder.ChatID)
+			reminderSvc.SetCardURL(cfg.Server.BaseURL + "/test.html")
+			log.Println("[hot-reload] 配置已重新加载")
+		}
+	}()
 
 	fmt.Println("Server running on http://localhost:" + cfg.Server.Port)
 	r.Run(":" + cfg.Server.Port)
@@ -477,12 +504,14 @@ func larkCallbackHandler(c *gin.Context) {
 		return
 	}
 
-	storeDB.SaveToken(userTokenInfo.OpenID, userTokenInfo.AccessToken, time.Duration(userTokenInfo.ExpiresIn)*time.Second)
+	// 同时持久化 refresh_token，便于 access_token 过期后自动续期
+	storeDB.SaveTokenFull(userTokenInfo.OpenID, userTokenInfo.AccessToken, userTokenInfo.RefreshToken, time.Duration(userTokenInfo.ExpiresIn)*time.Second)
 
 	// 设置 cookie，SameSite=Lax 支持 ngrok -> localhost 回调
+	// cookie 有效期与 JWT 一致，避免 cookie 早于 JWT 失效导致 2h 后被迫重新登录
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("token", tokenString, 7200, "/", "", false, true)
-	c.SetCookie("user_id", userTokenInfo.OpenID, 7200, "/", "", false, false)
+	c.SetCookie("token", tokenString, cfg.JWT.ExpireHours*3600, "/", "", false, true)
+	c.SetCookie("user_id", userTokenInfo.OpenID, cfg.JWT.ExpireHours*3600, "/", "", false, false)
 
 	// 回调后重定向到前端测试页面
 	c.Redirect(http.StatusFound, "/test.html")
@@ -734,6 +763,16 @@ func submitReportHandler(c *gin.Context) {
 	storeDB.SaveReport(report)
 
 	storeDB.LogAudit(userID, "submit", "report", report.ID, "提交周报", c.ClientIP())
+
+	// best-effort：将周报同步到飞书云文档（需应用具备 docx 权限，失败不影响提交）
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if url, derr := larkClient.CreateDocWithText(ctx, fmt.Sprintf("周报 %s ~ %s", report.WeekStart, report.WeekEnd), report.Markdown); derr == nil && url != "" {
+		report.FeishuDocURL = url
+		storeDB.SaveReport(report)
+	} else if derr != nil {
+		log.Printf("[WARN] 同步周报到飞书文档失败: %v", derr)
+	}
 
 	c.JSON(200, gin.H{"code": 0, "message": "周报提交成功", "data": report})
 }
@@ -1617,6 +1656,62 @@ func parseTimeOrNow(timeStr string) time.Time {
 		}
 	}
 	return time.Now()
+}
+
+// submissionsHandler 返回某周各成员的周报提交情况（管理员看板）。
+func submissionsHandler(c *gin.Context) {
+	weekStart := c.Query("week")
+	if weekStart == "" {
+		// 默认本周一（与 reminder.go 的算法保持一致）
+		now := time.Now()
+		offset := (int(now.Weekday()) + 6) % 7
+		monday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -offset)
+		weekStart = monday.Format("2006-01-02")
+	}
+
+	users, err := storeDB.ListAllUsers()
+	if err != nil {
+		response.FailInternal(c, err.Error())
+		return
+	}
+	submitted, _ := storeDB.ListSubmittedUsers(weekStart)
+	submittedMap := make(map[string]bool, len(submitted))
+	for _, uid := range submitted {
+		submittedMap[uid] = true
+	}
+
+	members := make([]gin.H, 0, len(users))
+	s := 0
+	for _, u := range users {
+		status := "unsubmitted"
+		if submittedMap[u.FeishuOpenID] {
+			status = "submitted"
+			s++
+		}
+		members = append(members, gin.H{"open_id": u.FeishuOpenID, "name": u.Name, "status": status})
+	}
+
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{
+		"week":        weekStart,
+		"total":       len(users),
+		"submitted":   s,
+		"unsubmitted": len(users) - s,
+		"members":     members,
+	}})
+}
+
+// auditLogsHandler 返回最近的操作审计日志（管理员）。
+func auditLogsHandler(c *gin.Context) {
+	limit := 100
+	if v := c.Query("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &limit)
+	}
+	logs, err := storeDB.ListAuditLogs("", limit)
+	if err != nil {
+		response.FailInternal(c, err.Error())
+		return
+	}
+	c.JSON(200, gin.H{"code": 0, "data": logs})
 }
 
 func getPreviousWeekStart(weekStart string) string {
