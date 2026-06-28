@@ -453,9 +453,14 @@ func larkLoginHandler(c *gin.Context) {
 	if redirectURI == "" {
 		redirectURI = "http://localhost:8080/api/v1/auth/lark/callback"
 	}
-	url := fmt.Sprintf("https://open.feishu.cn/open-apis/authen/v1/index?app_id=%s&redirect_uri=%s",
+	authURL := fmt.Sprintf("https://open.feishu.cn/open-apis/authen/v1/index?app_id=%s&redirect_uri=%s",
 		cfg.Feishu.AppID, url.QueryEscape(redirectURI))
-	c.JSON(200, gin.H{"code": 0, "data": gin.H{"auth_url": url}})
+	// 申请任务/日历/文档等权限范围；不带 scope 时 token 只有最小默认权限，
+	// 会导致任务、日历、文档接口因缺权限拉不到数据。
+	if s := strings.TrimSpace(cfg.Feishu.Scopes); s != "" {
+		authURL += "&scope=" + url.QueryEscape(s)
+	}
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{"auth_url": authURL}})
 }
 
 func larkCallbackHandler(c *gin.Context) {

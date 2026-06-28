@@ -745,7 +745,8 @@ func (c *Client) FetchUserTasks(ctx context.Context, userAccessToken string) ([]
 		log.Printf("[DEBUG] FetchUserTasks raw response: %s", string(body))
 
 		var result struct {
-			Code int `json:"code"`
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
 			Data struct {
 				Items     []Task `json:"items"`
 				PageToken string `json:"page_token"`
@@ -758,7 +759,14 @@ func (c *Client) FetchUserTasks(ctx context.Context, userAccessToken string) ([]
 		}
 
 		if result.Code != 0 {
-			return nil, fmt.Errorf("fetch tasks failed: code=%d", result.Code)
+			hint := ""
+			switch result.Code {
+			case 99991663, 99991661, 99991664:
+				hint = "（飞书登录态已过期，请重新登录后重试）"
+			case 99991672, 99991679, 1310213:
+				hint = "（user_access_token 缺少 task:task:readonly 权限：请确认登录授权时已申请该 scope，且应用在开放平台已开通任务读取权限并发布版本，然后退出重新登录授权）"
+			}
+			return nil, fmt.Errorf("fetch tasks failed: code=%d msg=%s%s", result.Code, result.Msg, hint)
 		}
 
 		log.Printf("[DEBUG] FetchUserTasks parsed %d items, has_more=%v", len(result.Data.Items), result.Data.HasMore)

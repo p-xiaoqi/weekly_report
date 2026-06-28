@@ -6,6 +6,10 @@ feishu:
   app_id: "${FEISHU_APP_ID}"
   app_secret: "${FEISHU_APP_SECRET}"
   redirect_uri: "${FEISHU_REDIRECT_URI}"
+  # OAuth 授权申请的权限范围（空格分隔）。留空将使用内置默认值。
+  # 不申请 scope 时 user_access_token 只有最小默认权限，会导致任务/日历/文档拉不到数据。
+  # 这些权限同时需要在开放平台「权限管理」中开通并发布版本，用户重新登录授权后才生效。
+  scopes: "${FEISHU_SCOPES}"  # 默认: contact:user.base:readonly task:task:readonly calendar:calendar:readonly drive:drive docx:document
 
 database:
   path: "weekly_report.db"

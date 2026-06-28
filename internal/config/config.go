@@ -21,6 +21,10 @@ type Config struct {
 		AppID       string `yaml:"app_id"`
 		AppSecret   string `yaml:"app_secret"`
 		RedirectURI string `yaml:"redirect_uri"`
+		// Scopes 为飞书 OAuth 授权时申请的权限范围（空格分隔）。
+		// 不申请 scope 时，user_access_token 只带最小默认权限，
+		// 会导致任务/日历/文档接口因缺权限而拉不到数据。
+		Scopes string `yaml:"scopes"`
 	} `yaml:"feishu"`
 	Database struct {
 		Path         string `yaml:"path"`
@@ -108,6 +112,10 @@ func Load() (*Config, error) {
 	cfg.Feishu.AppID = resolveEnv(cfg.Feishu.AppID)
 	cfg.Feishu.AppSecret = resolveEnv(cfg.Feishu.AppSecret)
 	cfg.Feishu.RedirectURI = resolveEnv(cfg.Feishu.RedirectURI)
+	cfg.Feishu.Scopes = resolveEnv(cfg.Feishu.Scopes)
+	if v := os.Getenv("FEISHU_SCOPES"); v != "" {
+		cfg.Feishu.Scopes = v
+	}
 	cfg.JWT.Secret = resolveEnv(cfg.JWT.Secret)
 	cfg.Reminder.BotWebhook = resolveEnv(cfg.Reminder.BotWebhook)
 	cfg.Reminder.BotSecret = resolveEnv(cfg.Reminder.BotSecret)
@@ -185,6 +193,12 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("generate random secret failed: %w", err)
 		}
 		cfg.JWT.Secret = secret
+	}
+
+	// 飞书 OAuth 申请权限：默认覆盖任务/日历/文档读取与文档创建，
+	// 不申请 scope 会导致 user_access_token 缺权限、任务等数据拉不到。
+	if cfg.Feishu.Scopes == "" {
+		cfg.Feishu.Scopes = "contact:user.base:readonly task:task:readonly calendar:calendar:readonly drive:drive docx:document"
 	}
 
 	// 安全校验：飞书密钥不能为空
