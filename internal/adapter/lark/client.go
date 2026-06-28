@@ -773,6 +773,55 @@ func (c *Client) FetchUserTasks(ctx context.Context, userAccessToken string) ([]
 	return allTasks, nil
 }
 
+// getPrimaryCalendarID 查询当前身份的主日历 calendar_id。
+// 飞书「获取日程列表」接口的 calendar_id 必须是真实 ID（形如
+// feishu.cn_xxx@group.calendar.feishu.cn），不能直接传字面量 "primary"，
+// 否则取不到任何日程。这里先调用「获取主日历」接口拿到真实 ID。
+func (c *Client) getPrimaryCalendarID(ctx context.Context, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://open.feishu.cn/open-apis/calendar/v4/calendars/primary", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Calendars []struct {
+				Calendar struct {
+					CalendarID string `json:"calendar_id"`
+				} `json:"calendar"`
+			} `json:"calendars"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("主日历响应无法解析(HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	if result.Code != 0 {
+		hint := ""
+		switch result.Code {
+		case 99991663, 99991661, 99991664:
+			hint = "（飞书登录态已过期，请重新登录后重试）"
+		case 9499:
+			hint = "（应用缺少 calendar:calendar 权限，请在开放平台开通并发布版本）"
+		}
+		return "", fmt.Errorf("获取主日历失败 code=%d msg=%s%s", result.Code, result.Msg, hint)
+	}
+	if len(result.Data.Calendars) == 0 || result.Data.Calendars[0].Calendar.CalendarID == "" {
+		return "", fmt.Errorf("未获取到主日历 ID（响应: %s）", string(body))
+	}
+	return result.Data.Calendars[0].Calendar.CalendarID, nil
+}
+
 func (c *Client) FetchUserCalendarEvents(ctx context.Context, userAccessToken string, startTime, endTime time.Time) ([]CalendarEvent, error) {
 	token := userAccessToken
 	if token == "" {
@@ -783,6 +832,14 @@ func (c *Client) FetchUserCalendarEvents(ctx context.Context, userAccessToken st
 		}
 	}
 
+	// 先解析真实主日历 ID（不能用字面量 "primary"）
+	calendarID, err := c.getPrimaryCalendarID(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[DEBUG] 主日历 calendar_id=%s", calendarID)
+	escapedCalendarID := url.PathEscape(calendarID)
+
 	var allEvents []CalendarEvent
 	pageToken := ""
 
@@ -790,7 +847,7 @@ func (c *Client) FetchUserCalendarEvents(ctx context.Context, userAccessToken st
 	endTs := endTime.Unix()
 
 	for {
-		url := fmt.Sprintf("https://open.feishu.cn/open-apis/calendar/v4/calendars/primary/events?page_size=100&start_time=%d&end_time=%d", startTs, endTs)
+		url := fmt.Sprintf("https://open.feishu.cn/open-apis/calendar/v4/calendars/%s/events?page_size=100&start_time=%d&end_time=%d", escapedCalendarID, startTs, endTs)
 		if pageToken != "" {
 			url += "&page_token=" + pageToken
 		}
@@ -853,17 +910,25 @@ type UserTokenInfo struct {
 type Task struct {
 	GUID          string `json:"guid"`
 	Summary       string `json:"summary"`
-	Notes         string `json:"notes"`
+	Notes         string `json:"description"` // task v2 用 description 字段
 	Completed     bool   `json:"completed"`
 	CompletedTime string `json:"completed_time"`
-	CompletedAt   string `json:"completed_at"`
+	CompletedAt   string `json:"completed_at"` // 毫秒字符串，""/"0" 表示未完成
 	Status        string `json:"status"`
 	CreateTime    string `json:"create_time"`
 	UpdateTime    string `json:"update_time"`
-	DueTime       string `json:"due_time"`
-	Priority      int    `json:"priority"`
-	TopicGUID     string `json:"topic_guid"`
-	TopicName     string `json:"topic_name"`
+	// task v2 的截止时间是嵌套对象 due.timestamp（毫秒字符串），不是扁平 due_time
+	Due struct {
+		Timestamp string `json:"timestamp"`
+		IsAllDay  bool   `json:"is_all_day"`
+	} `json:"due"`
+	Start struct {
+		Timestamp string `json:"timestamp"`
+		IsAllDay  bool   `json:"is_all_day"`
+	} `json:"start"`
+	Priority  int    `json:"priority"`
+	TopicGUID string `json:"topic_guid"`
+	TopicName string `json:"topic_name"`
 }
 
 type CalendarEvent struct {

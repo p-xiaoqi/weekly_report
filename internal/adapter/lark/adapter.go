@@ -74,13 +74,14 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 	} else {
 		log.Printf("[DEBUG] 获取到 %d 条任务", len(tasks))
 		for _, task := range tasks {
-			// 飞书任务状态字段是 status: "done" / "todo"
-			if task.Status == "done" {
-				// 优先使用 completed_at（飞书实际返回的字段）
-				completedTimeStr := task.CompletedAt
-				if completedTimeStr == "" {
-					completedTimeStr = task.CompletedTime
-				}
+			// task v2 没有 status:"done" 字段，完成与否看 completed_at（""/"0" 表示未完成）
+			completedTimeStr := task.CompletedAt
+			if completedTimeStr == "" {
+				completedTimeStr = task.CompletedTime
+			}
+			isCompleted := completedTimeStr != "" && completedTimeStr != "0"
+
+			if isCompleted {
 				completedTime := parseTimestampOrRFC3339(completedTimeStr)
 				if completedTime.IsZero() {
 					log.Printf("[WARN] 任务 completed_at 解析失败: %s", completedTimeStr)
@@ -106,18 +107,20 @@ func (a *Adapter) Fetch(ctx context.Context, req FetchRequest) ([]model.WorkReco
 			}
 
 			// 未完成任务 → 候选"下周计划"
-			dueTime := parseTimestampOrRFC3339(task.DueTime)
+			// task v2 截止时间在嵌套对象 due.timestamp（毫秒字符串）
+			dueTime := parseTimestampOrRFC3339(task.Due.Timestamp)
 			// 选取规则：
-			//   1) 有 due_time 且落在下周区间 → 必选
-			//   2) 有 due_time 但已过期（< 本周开始） → 跳过（视为遗留）
-			//   3) 有 due_time 在本周内 → 跳过（属于本周应完成而未完成，不算下周计划）
-			//   4) 无 due_time → 仍纳入下周计划，方便用户补充安排
+			//   1) 有 due 且落在下周区间 → 必选
+			//   2) 有 due 但已过期（< 本周开始） → 跳过（视为遗留）
+			//   3) 有 due 在本周内 → 跳过（属于本周应完成而未完成，不算下周计划）
+			//   4) 无 due → 仍纳入下周计划，方便用户补充安排
 			if !dueTime.IsZero() {
 				if dueTime.Before(nextWeekStart) || dueTime.After(nextWeekEnd) {
+					log.Printf("[DEBUG] 未完成任务因 due 不在下周区间被跳过: %s, due=%s", task.Summary, dueTime.Format("2006-01-02 15:04"))
 					continue
 				}
 			}
-			log.Printf("[DEBUG] 未完成任务纳入下周计划: %s, due_time=%s", task.Summary, task.DueTime)
+			log.Printf("[DEBUG] 未完成任务纳入下周计划: %s, due=%s", task.Summary, task.Due.Timestamp)
 			pendingTasks = append(pendingTasks, model.WorkRecord{
 				UserID:      req.UserID,
 				SourceType:  "lark",
